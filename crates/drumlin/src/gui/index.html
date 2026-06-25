@@ -6,98 +6,104 @@
 <title>Drumlin</title>
 <style>
   :root {
-    --accent: #E0A33E;
-    --bg: #0E0F12;
-    --bg-2: #0C0D10;
-    --panel: #15171C;
-    --panel-2: #101216;
-    --raise: #1B1E24;
-    --track: #2A2E36;
-    --border: #23262D;
-    --border-2: #20242B;
-    --hair: #34383F;
-    --text: #E6E8EC;
-    --text-2: #C2C7CF;
-    --dim: #9AA0AC;
-    --dim-3: #6A707C;
-    --dim-5: #454B55;
+    --accent: #E0A33E; --bg: #0E0F12; --bg-2: #0C0D10; --panel: #15171C;
+    --panel-2: #101216; --raise: #1B1E24; --track: #2A2E36; --border: #23262D;
+    --border-2: #20242B; --hair: #34383F; --text: #E6E8EC; --text-2: #C2C7CF;
+    --dim: #9AA0AC; --dim-3: #6A707C; --dim-5: #454B55;
     --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
     --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
-  body {
-    background: var(--bg); color: var(--text); font-family: var(--sans);
-    font-size: 12px; -webkit-font-smoothing: antialiased; user-select: none; overflow: hidden;
-  }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 12px; -webkit-font-smoothing: antialiased; user-select: none; overflow: hidden; }
   #shell { display: flex; flex-direction: column; height: 100vh; }
 
-  .header {
-    height: 52px; flex: 0 0 52px; display: flex; align-items: center; gap: 16px; padding: 0 16px;
-    background: linear-gradient(180deg, #15171C, #101216); border-bottom: 1px solid var(--border);
-  }
-  .brand { font-family: var(--mono); font-weight: 600; font-size: 17px; letter-spacing: 3px; color: var(--accent); text-shadow: 0 0 14px rgba(224,163,62,0.35); }
-  .sub { font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; color: var(--dim-3); }
+  .header { height: 50px; flex: 0 0 50px; display: flex; align-items: center; gap: 12px; padding: 0 14px; background: linear-gradient(180deg, #15171C, #101216); border-bottom: 1px solid var(--border); }
+  .brand { font-family: var(--mono); font-weight: 600; font-size: 16px; letter-spacing: 3px; color: var(--accent); text-shadow: 0 0 14px rgba(224,163,62,0.35); }
+  .sub { font-family: var(--mono); font-size: 7.5px; letter-spacing: 1.5px; color: var(--dim-3); }
   .spacer { flex: 1; }
-  .chip {
-    font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--dim);
-    background: var(--raise); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
-    display: flex; gap: 6px; align-items: center; cursor: default;
-  }
+  .chip { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--dim); background: var(--raise); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; display: flex; gap: 5px; align-items: center; cursor: default; }
   .chip b { color: var(--text-2); font-weight: 600; }
-  .play { cursor: pointer; color: var(--accent); border-color: rgba(224,163,62,0.4); }
-  .play.on { color: var(--bg); background: var(--accent); box-shadow: 0 0 12px rgba(224,163,62,0.45); }
+  .btn { cursor: pointer; }
+  .btn.on { color: var(--bg); background: var(--accent); border-color: var(--accent); box-shadow: 0 0 12px rgba(224,163,62,0.45); }
+  .fill { cursor: pointer; color: var(--accent); border-color: rgba(224,163,62,0.4); }
+  .fill.held { color: var(--bg); background: var(--accent); }
   .pump { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; box-shadow: 0 0 12px rgba(224,163,62,0.4); }
+  .slid { display: flex; align-items: center; gap: 6px; }
+  input[type=range] { -webkit-appearance: none; height: 3px; background: var(--track); border-radius: 2px; outline: none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+
+  .pats { display: flex; gap: 3px; }
+  .pat { width: 15px; height: 18px; border-radius: 3px; background: var(--raise); border: 1px solid var(--border); cursor: pointer; font-family: var(--mono); font-size: 7px; color: var(--dim-5); display: flex; align-items: center; justify-content: center; }
+  .pat.used { color: var(--dim); border-color: var(--track); }
+  .pat.cur { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+  .pat.queued { border-color: var(--accent); color: var(--accent); }
 
   .band { flex: 1; display: flex; min-height: 0; }
-  .rail { width: 78px; flex: 0 0 78px; background: var(--panel-2); border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; padding: 8px 6px; }
+  .rail { width: 64px; flex: 0 0 64px; background: var(--panel-2); border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; padding: 8px 5px; }
   .rail-btn { font-family: var(--mono); font-size: 8px; letter-spacing: 1px; color: var(--dim); background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 9px 2px; text-align: center; cursor: default; }
   .rail-btn.on { color: var(--accent); border-color: rgba(224,163,62,0.4); background: rgba(224,163,62,0.10); }
 
-  .grid-wrap { flex: 1; padding: 12px 14px; overflow: auto; }
+  .grid-wrap { flex: 1; padding: 10px 12px; overflow: auto; }
   .grid { display: grid; gap: 4px; align-items: center; }
-  .lane-name {
-    font-family: var(--mono); font-size: 9px; letter-spacing: 0.4px; color: var(--text-2);
-    padding: 0 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px;
-    height: 28px; display: flex; align-items: center; gap: 6px;
-  }
-  .lane-name.silent { color: var(--dim-5); }
+  .lane-name { font-family: var(--mono); font-size: 9px; letter-spacing: 0.3px; color: var(--text-2); padding: 0 7px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; height: 28px; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .lane-name.lanesel { border-color: var(--accent); }
   .lane-name .led { width: 6px; height: 6px; border-radius: 50%; background: var(--dim-5); flex: 0 0 6px; }
   .lane-name .led.lit { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-  .cell { height: 28px; border-radius: 4px; background: var(--raise); border: 1px solid var(--border-2); cursor: pointer; transition: background 40ms linear; }
+  .cell { position: relative; height: 28px; border-radius: 4px; background: var(--raise); border: 1px solid var(--border-2); cursor: pointer; }
   .cell.beat { border-color: var(--hair); }
-  .cell.on { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 7px rgba(224,163,62,0.35); }
-  .cell.silent { cursor: default; opacity: 0.55; }
+  .cell.on { background: var(--accent); border-color: var(--accent); }
+  .cell.prob::after { content: ""; position: absolute; top: 2px; right: 2px; width: 4px; height: 4px; border-radius: 50%; background: var(--bg); opacity: 0.7; }
+  .cell.plk { box-shadow: inset 3px 0 0 var(--bg); }
+  .cell.rat::before { content: ""; position: absolute; bottom: 2px; left: 3px; right: 3px; height: 2px; background: repeating-linear-gradient(90deg, var(--bg) 0 2px, transparent 2px 4px); opacity: 0.6; }
   .cell.play { outline: 2px solid rgba(224,163,62,0.55); outline-offset: -2px; }
+  .cell.sel { outline: 2px solid #fff; outline-offset: -2px; }
   .hdr-num { font-family: var(--mono); font-size: 8px; color: var(--dim-5); text-align: center; }
   .hdr-num.beat { color: var(--dim); }
   .hdr-num.play { color: var(--accent); }
 
-  .footer { height: 96px; flex: 0 0 96px; display: flex; align-items: center; gap: 18px; padding: 0 16px; background: linear-gradient(0deg, #15171C, #101216); border-top: 1px solid var(--border); }
-  .pads { display: grid; grid-template-columns: repeat(4, 46px); grid-template-rows: repeat(3, 26px); gap: 5px; }
-  .pad { border-radius: 6px; background: var(--raise); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 7.5px; letter-spacing: 0.5px; color: var(--dim); cursor: pointer; text-align: center; }
-  .pad.live { color: var(--text-2); }
-  .pad.silent { color: var(--dim-5); cursor: default; }
-  .pad.hit { background: var(--accent); color: var(--bg); border-color: var(--accent); box-shadow: 0 0 10px rgba(224,163,62,0.45); }
-  .note { font-family: var(--mono); font-size: 9px; letter-spacing: 0.5px; color: var(--dim-3); line-height: 1.7; }
+  .insp { width: 232px; flex: 0 0 232px; background: var(--panel-2); border-left: 1px solid var(--border); padding: 11px 12px; overflow-y: auto; font-size: 11px; }
+  .insp h4 { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; margin: 12px 0 7px; }
+  .insp h4:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+  .row label { color: var(--dim); font-size: 10px; }
+  .row .val { font-family: var(--mono); font-size: 10px; color: var(--text-2); min-width: 30px; text-align: right; }
+  .row input[type=range] { flex: 1; }
+  .seg { display: inline-flex; gap: 2px; background: var(--bg); border: 1px solid var(--track); border-radius: 5px; padding: 2px; }
+  .seg button { background: transparent; border: none; color: var(--dim); font-family: var(--mono); font-size: 9px; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
+  .seg button.sel { background: var(--accent); color: var(--bg); }
+  select { background: var(--raise); color: var(--text-2); border: 1px solid var(--border); border-radius: 4px; font-family: var(--mono); font-size: 10px; padding: 3px 5px; }
+  .plkrow { display: flex; align-items: center; gap: 6px; margin: 5px 0; }
+  .plkrow .pchk { width: 13px; height: 13px; border-radius: 3px; border: 1px solid var(--track); background: var(--raise); cursor: pointer; flex: 0 0 13px; }
+  .plkrow .pchk.on { background: var(--accent); border-color: var(--accent); }
+  .plkrow label { width: 56px; color: var(--dim); font-size: 9.5px; }
+  .plkrow input[type=range] { flex: 1; }
+  .laneops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .opbtn { font-family: var(--mono); font-size: 9px; color: var(--dim); background: var(--raise); border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+  .opbtn:hover { color: var(--text-2); border-color: var(--track); }
+  .empty { color: var(--dim-5); font-size: 10px; line-height: 1.6; }
+
+  .footer { height: 78px; flex: 0 0 78px; display: flex; align-items: center; gap: 16px; padding: 0 14px; background: linear-gradient(0deg, #15171C, #101216); border-top: 1px solid var(--border); }
+  .pads { display: grid; grid-template-columns: repeat(6, 42px); grid-template-rows: repeat(2, 26px); gap: 4px; }
+  .pad { border-radius: 5px; background: var(--raise); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 7px; letter-spacing: 0.4px; color: var(--dim); cursor: pointer; text-align: center; }
+  .pad.hit { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .note { font-family: var(--mono); font-size: 9px; letter-spacing: 0.4px; color: var(--dim-3); line-height: 1.7; }
   .note b { color: var(--dim); font-weight: 600; }
 </style>
 </head>
 <body>
   <div id="shell">
     <div class="header">
-      <div>
-        <div class="brand">DRUMLIN</div>
-        <div class="sub">RHYTHM SIBLING TO ESKER</div>
-      </div>
-      <div class="chip play" id="play">▶ PLAY</div>
-      <div class="chip play on" id="seq" title="Internal step sequencer. Off = play Drumlin purely from MIDI notes / pads.">SEQ</div>
-      <div class="chip"><b id="bpm">120.0</b> BPM</div>
-      <div class="chip">SWING <b>50</b></div>
-      <div class="chip">LEN <b id="len">16</b></div>
+      <div><div class="brand">DRUMLIN</div><div class="sub">RHYTHM SIBLING TO ESKER</div></div>
+      <div class="chip fill" id="play">▶</div>
+      <div class="chip btn on" id="seq" title="Internal sequencer on/off">SEQ</div>
+      <div class="chip fill" id="fill" title="Hold to engage Fill-conditional steps">FILL</div>
+      <div class="chip"><b id="bpm">120</b> BPM</div>
+      <div class="chip slid">SW <input type="range" id="swing" min="50" max="75" value="50" style="width:54px"><b id="swingv">50</b></div>
+      <div class="chip slid">HM <input type="range" id="human" min="0" max="100" value="0" style="width:48px"><b id="humanv">0</b></div>
       <div class="spacer"></div>
+      <div class="pats" id="pats"></div>
       <div class="chip pump">PUMP</div>
-      <div class="chip">KIT <b>NEUTRAL</b></div>
     </div>
 
     <div class="band">
@@ -109,160 +115,269 @@
         <div class="rail-btn">BUS FX</div>
         <div class="rail-btn">KITS</div>
       </div>
-      <div class="grid-wrap">
-        <div class="grid" id="grid"></div>
-      </div>
+      <div class="grid-wrap"><div class="grid" id="grid"></div></div>
+      <div class="insp" id="insp"></div>
     </div>
 
     <div class="footer">
       <div class="pads" id="pads"></div>
       <div class="note">
-        <div><b>M2.</b> Press PLAY (standalone) or run the host transport — the grid grooves.</div>
-        <div>Click cells to program · tap pads to audition · closed hat chokes the open hat.</div>
+        <div><b>Click</b> a cell to toggle · select to edit it on the right · <b>shift-click</b> a lane name for lane tools.</div>
+        <div>Set probability, ratchets, conditions &amp; <b>p-locks</b> per step. Hold FILL for fill steps.</div>
       </div>
     </div>
   </div>
 
 <script>
-  // Track 0..11 layout (design §3.2). Active (sounding) tracks in M2:
   const LANES = ["KICK","SUB","SNARE","CLAP","RIM","CL HAT","OP HAT","RIDE","TOM LO","TOM HI","COWBELL","ZAP"];
-  const ACTIVE = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]); // all 12 voiced at M4
-  const N_TRACKS = LANES.length;
-  let LENGTH = 16;
-  let grid = Array.from({ length: N_TRACKS }, () => Array(64).fill(false));
-  let cellEls = [];   // [track][step] -> div
-  let ledEls = [];    // [track] -> led span
-  let playCol = -1;
-  let playing = false;
+  const N_TRACKS = 12, N_PATTERNS = 16;
+  const NOTES = [36,35,38,39,37,42,46,51,45,50,56,60];
+  const PLOCK_PARAMS = [["level","LEVEL",0],["pan","PAN",1],["cutoff","CUTOFF",2],["resonance","RESO",3],["drive","DRIVE",4]];
+  const CONDS = [["Always",0],["Fill",1],["Not Fill",2],["First",3],["Not First",4],["1:2",5,1,2],["1:4",5,1,4],["3:4",5,3,4]];
+
+  let LENGTH = 16, swing = 50, human = 0;
+  let bank = [];     // [pattern][track][step] = step obj
+  let cur = 0;
+  let sel = null;    // {t, s}
+  let selLane = null;
+  let playing = false, seqOn = true, fillHeld = false;
+  let cellEls = [], ledEls = [], playCol = -1;
+
+  function blankStep() { return { on: false, vel: 105, prob: 100, rat: 1, cond: 0, ra: 1, rb: 2, micro: 0, accent: false, plk: {} }; }
+  function blankPat() { return Array.from({length: N_TRACKS}, () => Array.from({length: 64}, blankStep)); }
 
   const gridEl = document.getElementById("grid");
-  const playBtn = document.getElementById("play");
-  const lenEl = document.getElementById("len");
+  const inspEl = document.getElementById("insp");
+
+  function send(m) { if (window.sendToPlugin) window.sendToPlugin(m); }
+  function st(t, s) { return bank[cur][t][s]; }
 
   function buildGrid() {
     gridEl.innerHTML = "";
-    gridEl.style.gridTemplateColumns = `104px repeat(${LENGTH}, 1fr)`;
-    cellEls = Array.from({ length: N_TRACKS }, () => []);
+    gridEl.style.gridTemplateColumns = `100px repeat(${LENGTH}, 1fr)`;
+    cellEls = Array.from({length: N_TRACKS}, () => []);
     ledEls = [];
-
-    // header row
     gridEl.appendChild(document.createElement("div"));
     for (let s = 0; s < LENGTH; s++) {
       const n = document.createElement("div");
-      n.className = "hdr-num" + (s % 4 === 0 ? " beat" : "");
-      n.dataset.col = s;
-      n.textContent = s + 1;
+      n.className = "hdr-num" + (s % 4 === 0 ? " beat" : ""); n.dataset.col = s; n.textContent = s + 1;
       gridEl.appendChild(n);
     }
-
     for (let t = 0; t < N_TRACKS; t++) {
-      const active = ACTIVE.has(t);
       const name = document.createElement("div");
-      name.className = "lane-name" + (active ? "" : " silent");
-      const led = document.createElement("span");
-      led.className = "led";
-      ledEls[t] = led;
-      name.appendChild(led);
-      name.appendChild(document.createTextNode(LANES[t]));
+      name.className = "lane-name";
+      const led = document.createElement("span"); led.className = "led"; ledEls[t] = led;
+      name.appendChild(led); name.appendChild(document.createTextNode(LANES[t]));
+      name.addEventListener("click", () => selectLane(t));
       gridEl.appendChild(name);
-
       for (let s = 0; s < LENGTH; s++) {
         const c = document.createElement("div");
-        c.className = "cell" + (s % 4 === 0 ? " beat" : "") + (active ? "" : " silent");
-        if (grid[t][s]) c.classList.add("on");
-        c.addEventListener("click", () => toggleCell(t, s));
-        cellEls[t][s] = c;
-        gridEl.appendChild(c);
+        c.dataset.t = t; c.dataset.s = s;
+        c.addEventListener("click", () => clickCell(t, s));
+        c.addEventListener("contextmenu", (e) => { e.preventDefault(); selectStep(t, s); });
+        cellEls[t][s] = c; gridEl.appendChild(c);
       }
     }
+    for (let t = 0; t < N_TRACKS; t++) for (let s = 0; s < LENGTH; s++) paint(t, s);
   }
 
-  function toggleCell(t, s) {
-    grid[t][s] = !grid[t][s];
-    cellEls[t][s].classList.toggle("on", grid[t][s]);
-    send({ type: "step", track: t, step: s, on: grid[t][s] });
+  function paint(t, s) {
+    const o = st(t, s), el = cellEls[t][s];
+    if (!el) return;
+    el.className = "cell" + (s % 4 === 0 ? " beat" : "") + (o.on ? " on" : "")
+      + (o.on && o.prob < 100 ? " prob" : "") + (o.on && Object.keys(o.plk).length ? " plk" : "")
+      + (o.on && o.rat > 1 ? " rat" : "")
+      + (sel && sel.t === t && sel.s === s ? " sel" : "")
+      + (playCol === s ? " play" : "");
+    el.style.opacity = o.on ? (0.5 + 0.5 * o.vel / 127).toFixed(3) : "";
   }
 
-  function setPlayhead(col) {
-    if (col === playCol) return;
-    const clear = (c) => {
-      if (c < 0 || c >= LENGTH) return;
-      for (let t = 0; t < N_TRACKS; t++) cellEls[t][c] && cellEls[t][c].classList.remove("play");
-      const h = gridEl.querySelector(`.hdr-num[data-col="${c}"]`);
-      h && h.classList.remove("play");
-    };
-    clear(playCol);
-    if (col >= 0 && col < LENGTH) {
-      for (let t = 0; t < N_TRACKS; t++) cellEls[t][col] && cellEls[t][col].classList.add("play");
-      const h = gridEl.querySelector(`.hdr-num[data-col="${col}"]`);
-      h && h.classList.add("play");
+  function clickCell(t, s) {
+    const o = st(t, s); o.on = !o.on; paint(t, s);
+    send({ type: "step", track: t, step: s, on: o.on });
+    selectStep(t, s);
+  }
+
+  function selectStep(t, s) {
+    sel = { t, s }; selLane = null;
+    for (let tt = 0; tt < N_TRACKS; tt++) for (let ss = 0; ss < LENGTH; ss++) paint(tt, ss);
+    renderInsp();
+  }
+  function selectLane(t) {
+    if (event && event.shiftKey) { selLane = t; sel = null; renderInsp(); }
+    else { selLane = t; sel = null; renderInsp(); }
+  }
+
+  function sendParams(t, s) {
+    const o = st(t, s);
+    send({ type: "step-params", track: t, step: s, on: o.on, vel: o.vel, accent: o.accent, prob: o.prob, rat: o.rat, micro: o.micro, cond: o.cond, ra: o.ra, rb: o.rb });
+  }
+
+  function renderInsp() {
+    inspEl.innerHTML = "";
+    if (sel) return renderStepInsp(sel.t, sel.s);
+    if (selLane != null) return renderLaneInsp(selLane);
+    inspEl.innerHTML = '<div class="empty">Select a step (click or right-click a cell) to edit velocity, probability, ratchets, conditions and per-step parameter locks.</div>';
+  }
+
+  function mkSlider(label, min, max, val, fmt, oninput) {
+    const row = document.createElement("div"); row.className = "row";
+    const l = document.createElement("label"); l.textContent = label;
+    const r = document.createElement("input"); r.type = "range"; r.min = min; r.max = max; r.value = val;
+    const v = document.createElement("span"); v.className = "val"; v.textContent = fmt(val);
+    r.addEventListener("input", () => { v.textContent = fmt(+r.value); oninput(+r.value); });
+    row.appendChild(l); row.appendChild(r); row.appendChild(v); return row;
+  }
+
+  function renderStepInsp(t, s) {
+    const o = st(t, s);
+    inspEl.innerHTML = `<h4>STEP — ${LANES[t]} · ${s + 1}</h4>`;
+    inspEl.appendChild(mkSlider("Velocity", 0, 127, o.vel, x => x, x => { o.vel = x; paint(t, s); sendParams(t, s); }));
+    inspEl.appendChild(mkSlider("Probability", 0, 100, o.prob, x => x + "%", x => { o.prob = x; paint(t, s); sendParams(t, s); }));
+    inspEl.appendChild(mkSlider("Ratchet", 1, 8, o.rat, x => "×" + x, x => { o.rat = x; paint(t, s); sendParams(t, s); }));
+    inspEl.appendChild(mkSlider("Micro", -48, 48, o.micro, x => x, x => { o.micro = x; sendParams(t, s); }));
+    // accent
+    const arow = document.createElement("div"); arow.className = "row";
+    arow.innerHTML = "<label>Accent</label>";
+    const ab = document.createElement("button"); ab.className = "opbtn" + (o.accent ? " " : ""); ab.textContent = o.accent ? "ON" : "OFF";
+    if (o.accent) ab.style.color = "var(--accent)";
+    ab.addEventListener("click", () => { o.accent = !o.accent; ab.textContent = o.accent ? "ON" : "OFF"; ab.style.color = o.accent ? "var(--accent)" : ""; sendParams(t, s); });
+    arow.appendChild(ab); inspEl.appendChild(arow);
+    // condition
+    const crow = document.createElement("div"); crow.className = "row";
+    crow.innerHTML = "<label>Condition</label>";
+    const csel = document.createElement("select");
+    CONDS.forEach((c, i) => { const op = document.createElement("option"); op.value = i; op.textContent = c[0]; csel.appendChild(op); });
+    csel.value = condIndex(o);
+    csel.addEventListener("change", () => { const c = CONDS[+csel.value]; o.cond = c[1]; o.ra = c[2] || 1; o.rb = c[3] || 2; sendParams(t, s); });
+    crow.appendChild(csel); inspEl.appendChild(crow);
+    // p-locks
+    const h = document.createElement("h4"); h.textContent = "P-LOCKS"; inspEl.appendChild(h);
+    PLOCK_PARAMS.forEach(([id, lbl, idx]) => {
+      const row = document.createElement("div"); row.className = "plkrow";
+      const chk = document.createElement("div"); chk.className = "pchk" + (idx in o.plk ? " on" : "");
+      const lab = document.createElement("label"); lab.textContent = lbl;
+      const r = document.createElement("input"); r.type = "range"; r.min = 0; r.max = 1000; r.value = Math.round((o.plk[idx] ?? 0.5) * 1000); r.disabled = !(idx in o.plk);
+      chk.addEventListener("click", () => {
+        if (idx in o.plk) { delete o.plk[idx]; chk.classList.remove("on"); r.disabled = true; send({ type: "clear-plock", track: t, step: s, param: idx }); }
+        else { const val = +r.value / 1000; o.plk[idx] = val; chk.classList.add("on"); r.disabled = false; send({ type: "set-plock", track: t, step: s, param: idx, value: val }); }
+        paint(t, s);
+      });
+      r.addEventListener("input", () => { const val = +r.value / 1000; o.plk[idx] = val; send({ type: "set-plock", track: t, step: s, param: idx, value: val }); });
+      row.appendChild(chk); row.appendChild(lab); row.appendChild(r); inspEl.appendChild(row);
+    });
+  }
+
+  function condIndex(o) {
+    for (let i = 0; i < CONDS.length; i++) { const c = CONDS[i]; if (c[1] === o.cond && (c[1] !== 5 || (c[2] === o.ra && c[3] === o.rb))) return i; }
+    return 0;
+  }
+
+  function renderLaneInsp(t) {
+    inspEl.innerHTML = `<h4>LANE — ${LANES[t]}</h4>`;
+    const ops = document.createElement("div"); ops.className = "laneops";
+    const clr = document.createElement("button"); clr.className = "opbtn"; clr.textContent = "CLEAR LANE";
+    clr.addEventListener("click", () => { for (let s = 0; s < LENGTH; s++) { bank[cur][t][s] = blankStep(); paint(t, s); } send({ type: "clear-lane", track: t }); });
+    ops.appendChild(clr); inspEl.appendChild(ops);
+    inspEl.appendChild(document.createTextNode(""));
+    const h = document.createElement("h4"); h.textContent = "EUCLID"; inspEl.appendChild(h);
+    let pulses = 4, rot = 0;
+    const pr = mkSlider("Pulses", 0, LENGTH, pulses, x => x, x => { pulses = x; });
+    const rr = mkSlider("Rotate", 0, LENGTH - 1, rot, x => x, x => { rot = x; });
+    inspEl.appendChild(pr); inspEl.appendChild(rr);
+    const apply = document.createElement("button"); apply.className = "opbtn"; apply.textContent = "GENERATE";
+    apply.addEventListener("click", () => { euclidLocal(t, pulses, rot); send({ type: "euclid", track: t, pulses, rotate: rot }); });
+    inspEl.appendChild(apply);
+  }
+
+  function euclidLocal(t, k, rot) {
+    for (let s = 0; s < LENGTH; s++) bank[cur][t][s].on = false;
+    k = Math.min(k, LENGTH);
+    for (let i = 0; i < k; i++) { const pos = (Math.floor(i * LENGTH / k) + rot) % LENGTH; const o = bank[cur][t][pos]; o.on = true; if (!o.vel) o.vel = 105; }
+    for (let s = 0; s < LENGTH; s++) paint(t, s);
+  }
+
+  // ---- pattern bank selector ----
+  const patsEl = document.getElementById("pats");
+  let patEls = [];
+  for (let p = 0; p < N_PATTERNS; p++) {
+    const d = document.createElement("div"); d.className = "pat"; d.textContent = p + 1;
+    d.addEventListener("click", () => selectPattern(p));
+    patEls[p] = d; patsEl.appendChild(d);
+  }
+  function patUsed(p) { return bank[p].some(lane => lane.slice(0, LENGTH).some(o => o.on)); }
+  function refreshPats() {
+    for (let p = 0; p < N_PATTERNS; p++) {
+      patEls[p].className = "pat" + (patUsed(p) ? " used" : "") + (p === cur ? " cur" : "");
     }
-    playCol = col;
+  }
+  function selectPattern(p) {
+    send({ type: "select-pattern", idx: p });
+    if (!playing) { cur = p; refreshGridFromBank(); } // immediate when stopped (mirrors engine)
+    else { patEls[p].classList.add("queued"); }
+  }
+  function refreshGridFromBank() {
+    for (let t = 0; t < N_TRACKS; t++) for (let s = 0; s < LENGTH; s++) paint(t, s);
+    sel = null; selLane = null; renderInsp(); refreshPats();
   }
 
-  function setVoices(mask) {
-    for (let t = 0; t < N_TRACKS; t++) {
-      ledEls[t] && ledEls[t].classList.toggle("lit", (mask & (1 << t)) !== 0);
-    }
-  }
+  // ---- transport / fill / swing / humanize ----
+  const playBtn = document.getElementById("play");
+  playBtn.addEventListener("click", () => { playing = !playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶"; send({ type: "transport", play: playing }); });
+  const seqBtn = document.getElementById("seq");
+  seqBtn.addEventListener("click", () => { seqOn = !seqOn; seqBtn.classList.toggle("on", seqOn); send({ type: "seq-enable", on: seqOn }); });
+  const fillBtn = document.getElementById("fill");
+  const fillDown = () => { fillHeld = true; fillBtn.classList.add("held"); send({ type: "fill", on: true }); };
+  const fillUp = () => { fillHeld = false; fillBtn.classList.remove("held"); send({ type: "fill", on: false }); };
+  fillBtn.addEventListener("pointerdown", fillDown);
+  fillBtn.addEventListener("pointerup", fillUp);
+  fillBtn.addEventListener("pointerleave", () => { if (fillHeld) fillUp(); });
+  const swingEl = document.getElementById("swing"), swingV = document.getElementById("swingv");
+  swingEl.addEventListener("input", () => { swing = +swingEl.value; swingV.textContent = swing; send({ type: "swing", value: swing }); });
+  const humanEl = document.getElementById("human"), humanV = document.getElementById("humanv");
+  humanEl.addEventListener("input", () => { human = +humanEl.value; humanV.textContent = human; send({ type: "humanize", value: human }); });
 
-  function setPlaying(on) {
-    playing = on;
-    playBtn.classList.toggle("on", on);
-  }
-
-  // ---- pad bank: first 5 pads map to the M2 voices ----
-  const PADS = [
-    { name: "KICK", note: 36 }, { name: "SUB", note: 35 }, { name: "SNARE", note: 38 }, { name: "CLAP", note: 39 },
-    { name: "RIM", note: 37 }, { name: "CL HAT", note: 42 }, { name: "OP HAT", note: 46 }, { name: "RIDE", note: 51 },
-    { name: "TOM LO", note: 45 }, { name: "TOM HI", note: 50 }, { name: "COWBL", note: 56 }, { name: "ZAP", note: 60 },
-  ];
+  // ---- pads ----
   const padsEl = document.getElementById("pads");
-  PADS.forEach((p) => {
-    const d = document.createElement("div");
-    if (p) {
-      d.className = "pad live";
-      d.textContent = p.name;
-      const down = (e) => { e.preventDefault(); d.classList.add("hit"); send({ type: "note", on: true, note: p.note }); };
-      const up = () => { d.classList.remove("hit"); send({ type: "note", on: false, note: p.note }); };
-      d.addEventListener("pointerdown", down);
-      d.addEventListener("pointerup", up);
-      d.addEventListener("pointerleave", up);
-    } else {
-      d.className = "pad silent";
-    }
+  LANES.forEach((nm, i) => {
+    const d = document.createElement("div"); d.className = "pad"; d.textContent = nm;
+    const down = (e) => { e.preventDefault(); d.classList.add("hit"); send({ type: "note", on: true, note: NOTES[i] }); };
+    const up = () => { d.classList.remove("hit"); send({ type: "note", on: false, note: NOTES[i] }); };
+    d.addEventListener("pointerdown", down); d.addEventListener("pointerup", up); d.addEventListener("pointerleave", up);
     padsEl.appendChild(d);
   });
 
-  playBtn.addEventListener("click", () => { setPlaying(!playing); send({ type: "transport", play: playing }); });
-
-  // ---- SEQ enable: groovebox (grid runs) vs. pure MIDI/pad-driven ----
-  const seqBtn = document.getElementById("seq");
-  let seqOn = true;
-  function setSeq(on) { seqOn = on; seqBtn.classList.toggle("on", on); }
-  seqBtn.addEventListener("click", () => { setSeq(!seqOn); send({ type: "seq-enable", on: seqOn }); });
-
-  function send(msg) { if (window.sendToPlugin) window.sendToPlugin(msg); }
+  // ---- playhead + status ----
+  function setPlayhead(col) {
+    if (col === playCol) return;
+    const old = playCol; playCol = col;
+    if (old >= 0 && old < LENGTH) { for (let t = 0; t < N_TRACKS; t++) paint(t, old); const h = gridEl.querySelector(`.hdr-num[data-col="${old}"]`); h && h.classList.remove("play"); }
+    if (col >= 0 && col < LENGTH) { for (let t = 0; t < N_TRACKS; t++) paint(t, col); const h = gridEl.querySelector(`.hdr-num[data-col="${col}"]`); h && h.classList.add("play"); }
+  }
+  function setVoices(mask) { for (let t = 0; t < N_TRACKS; t++) ledEls[t] && ledEls[t].classList.toggle("lit", (mask & (1 << t)) !== 0); }
 
   window.onPluginMessage = function (msg) {
     if (!msg || !msg.type) return;
     if (msg.type === "grid") {
       LENGTH = msg.length;
-      lenEl.textContent = msg.length;
-      for (let t = 0; t < N_TRACKS; t++) {
-        for (let s = 0; s < LENGTH; s++) grid[t][s] = !!(msg.cells[t] && msg.cells[t][s]);
+      bank = Array.from({length: N_PATTERNS}, blankPat);
+      for (let t = 0; t < N_TRACKS; t++) for (let s = 0; s < LENGTH; s++) {
+        const c = (msg.cells[t] || [])[s];
+        if (c) bank[0][t][s] = { on: !!c.on, vel: c.vel, prob: c.prob, rat: c.rat, cond: c.cond, ra: 1, rb: 2, micro: 0, accent: false, plk: {} };
       }
-      buildGrid();
+      swing = msg.swing; human = msg.humanize;
+      swingEl.value = swing; swingV.textContent = swing; humanEl.value = human; humanV.textContent = human;
+      buildGrid(); renderInsp(); refreshPats();
     } else if (msg.type === "status") {
-      setPlayhead(msg.playhead);
-      setVoices(msg.voices);
-      setPlaying(msg.playing);
-      if ("seq" in msg) setSeq(msg.seq);
+      setPlayhead(msg.playhead); setVoices(msg.voices);
+      playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";
+      if ("seq" in msg) { seqOn = msg.seq; seqBtn.classList.toggle("on", seqOn); }
+      if ("pattern" in msg && msg.pattern !== cur) { cur = msg.pattern; patEls.forEach(e => e.classList.remove("queued")); refreshGridFromBank(); }
     }
   };
 
-  // initial empty grid, then ask the plugin for the real pattern
-  buildGrid();
+  bank = Array.from({length: N_PATTERNS}, blankPat);
+  buildGrid(); renderInsp();
   send({ type: "init" });
 </script>
 </body>

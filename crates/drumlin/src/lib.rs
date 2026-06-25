@@ -14,10 +14,10 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use serde::Deserialize;
 use serde_json::json;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use percussion_core::{track_for_note, DrumKit, Pattern, Sequencer, MAX_TRACKS};
+use percussion_core::{track_for_note, DrumKit, Pattern, Sequencer, TrigCondition, MAX_TRACKS};
 
 const EDITOR_WIDTH: u32 = 1100;
 const EDITOR_HEIGHT: u32 = 800;
@@ -30,16 +30,20 @@ const EDIT_QUEUE_CAP: usize = 512;
 /// Default velocity for on-screen pad hits.
 const PAD_VELOCITY: f32 = 0.9;
 
-// ---- edit-ring packing: a single u32 carries a step toggle -----------------
-// bits: [10..7]=track(0..15), [7..1]=step(0..63), [0]=on
-fn pack_step(track: usize, step: usize, on: bool) -> u32 {
-    (((track as u32) & 0xF) << 7) | (((step as u32) & 0x3F) << 1) | (on as u32)
-}
-fn unpack_step(v: u32) -> (usize, usize, bool) {
-    let on = v & 1 != 0;
-    let step = ((v >> 1) & 0x3F) as usize;
-    let track = ((v >> 7) & 0xF) as usize;
-    (track, step, on)
+/// Editor -> audio sequencer edits, sent over a lock-free ring and applied at
+/// block start. POD/`Copy` so the ring never allocates.
+#[derive(Clone, Copy)]
+enum SeqEdit {
+    SetStep { track: u8, step: u8, on: bool },
+    StepParams { track: u8, step: u8, on: bool, vel: u8, accent: bool, prob: u8, rat: u8, micro: i16, cond: u8, ra: u8, rb: u8 },
+    SetPlock { track: u8, step: u8, param: u16, value: f32 },
+    ClearPlock { track: u8, step: u8, param: u16 },
+    ClearLane { track: u8 },
+    Euclid { track: u8, pulses: u8, rotate: u8 },
+    Fill { on: bool },
+    SelectPattern { idx: u8 },
+    Swing { value: u8 },
+    Humanize { value: u8 },
 }
 
 /// JS -> Rust messages from the webview.
@@ -48,7 +52,16 @@ fn unpack_step(v: u32) -> (usize, usize, bool) {
 enum Action {
     Init,
     Note { on: bool, note: u8 },
-    Step { track: usize, step: usize, on: bool },
+    Step { track: u8, step: u8, on: bool },
+    StepParams { track: u8, step: u8, on: bool, vel: u8, accent: bool, prob: u8, rat: u8, micro: i16, cond: u8, ra: u8, rb: u8 },
+    SetPlock { track: u8, step: u8, param: u16, value: f32 },
+    ClearPlock { track: u8, step: u8, param: u16 },
+    ClearLane { track: u8 },
+    Euclid { track: u8, pulses: u8, rotate: u8 },
+    Fill { on: bool },
+    SelectPattern { idx: u8 },
+    Swing { value: u8 },
+    Humanize { value: u8 },
     Transport { play: bool },
     SeqEnable { on: bool },
 }
@@ -94,9 +107,9 @@ pub struct Drumlin {
     /// to the host's recorded MIDI stream (the Esker lesson).
     kbd_tx: Option<Producer<u16>>,
     kbd_rx: Consumer<u16>,
-    /// Grid step-edit ring (editor -> audio).
-    edit_tx: Option<Producer<u32>>,
-    edit_rx: Consumer<u32>,
+    /// Sequencer edit ring (editor -> audio).
+    edit_tx: Option<Producer<SeqEdit>>,
+    edit_rx: Consumer<SeqEdit>,
 
     /// GUI PLAY toggle for the internal preview clock.
     internal_play: Arc<AtomicBool>,
@@ -104,6 +117,9 @@ pub struct Drumlin {
     playhead: Arc<AtomicI32>,
     /// Per-track "sounding" bitmap (bit t = track t active), for trigger LEDs.
     voice_active: Arc<AtomicU16>,
+    /// Current pattern slot, published for the GUI (auto-changes on a queued
+    /// song-chain switch).
+    cur_pattern: Arc<AtomicU8>,
     /// Effective playing state (host transport OR internal clock), published so
     /// the GUI PLAY indicator reflects host-driven playback too.
     effective_playing: Arc<AtomicBool>,
@@ -120,7 +136,7 @@ pub struct Drumlin {
 impl Default for Drumlin {
     fn default() -> Self {
         let (kbd_tx, kbd_rx) = RingBuffer::<u16>::new(KBD_QUEUE_CAP);
-        let (edit_tx, edit_rx) = RingBuffer::<u32>::new(EDIT_QUEUE_CAP);
+        let (edit_tx, edit_rx) = RingBuffer::<SeqEdit>::new(EDIT_QUEUE_CAP);
         Self {
             params: Arc::new(DrumlinParams::default()),
             sample_rate: 48_000.0,
@@ -135,6 +151,7 @@ impl Default for Drumlin {
             internal_play: Arc::new(AtomicBool::new(false)),
             playhead: Arc::new(AtomicI32::new(-1)),
             voice_active: Arc::new(AtomicU16::new(0)),
+            cur_pattern: Arc::new(AtomicU8::new(0)),
             effective_playing: Arc::new(AtomicBool::new(false)),
             seq_enabled: Arc::new(AtomicBool::new(true)),
             fx_reset_pending: Arc::new(AtomicBool::new(false)),
@@ -142,14 +159,37 @@ impl Default for Drumlin {
     }
 }
 
-/// JSON of the initial Neutral demo grid for the GUI to render on init.
+/// JSON of the initial Neutral demo grid (slot 0). The GUI mirrors the bank
+/// locally from here + applies its own edits, so it stays in sync without the
+/// audio thread pushing 16 patterns back.
 fn grid_json() -> serde_json::Value {
     let p = Pattern::neutral_demo();
     let len = p.length as usize;
-    let cells: Vec<Vec<bool>> = (0..MAX_TRACKS)
-        .map(|t| (0..len).map(|s| p.tracks[t].steps[s].on).collect())
+    let cells: Vec<Vec<serde_json::Value>> = (0..MAX_TRACKS)
+        .map(|t| {
+            (0..len)
+                .map(|s| {
+                    let st = &p.tracks[t].steps[s];
+                    json!({
+                        "on": st.on,
+                        "vel": st.velocity,
+                        "prob": st.probability,
+                        "rat": st.ratchet,
+                        "cond": st.condition.code(),
+                        "plk": st.plock_count,
+                    })
+                })
+                .collect()
+        })
         .collect();
-    json!({ "type": "grid", "length": p.length, "tracks": MAX_TRACKS, "cells": cells })
+    json!({
+        "type": "grid",
+        "length": p.length,
+        "tracks": MAX_TRACKS,
+        "swing": p.swing,
+        "humanize": p.humanize,
+        "cells": cells,
+    })
 }
 
 impl Plugin for Drumlin {
@@ -183,6 +223,7 @@ impl Plugin for Drumlin {
         let internal_play = self.internal_play.clone();
         let playhead = self.playhead.clone();
         let voice_active = self.voice_active.clone();
+        let cur_pattern = self.cur_pattern.clone();
         let effective_playing = self.effective_playing.clone();
         let seq_enabled = self.seq_enabled.clone();
         // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
@@ -200,14 +241,21 @@ impl Plugin for Drumlin {
                 && event.key == nih_plug_webview::Key::Escape
         })
         .with_event_loop(move |ctx, _setter, _window| {
+            macro_rules! push_edit {
+                ($e:expr) => {{
+                    if let Ok(mut tx) = edit_tx.lock() {
+                        if let Some(tx) = tx.as_mut() {
+                            let _ = tx.push($e);
+                        }
+                    }
+                }};
+            }
             while let Ok(value) = ctx.next_event() {
                 let Ok(action) = serde_json::from_value::<Action>(value) else {
                     continue;
                 };
                 match action {
-                    Action::Init => {
-                        ctx.send_json(grid_json());
-                    }
+                    Action::Init => ctx.send_json(grid_json()),
                     Action::Note { on, note } => {
                         if let Ok(mut tx) = kbd_tx.lock() {
                             if let Some(tx) = tx.as_mut() {
@@ -216,29 +264,37 @@ impl Plugin for Drumlin {
                             }
                         }
                     }
-                    Action::Step { track, step, on } => {
-                        if let Ok(mut tx) = edit_tx.lock() {
-                            if let Some(tx) = tx.as_mut() {
-                                let _ = tx.push(pack_step(track, step, on));
-                            }
-                        }
+                    Action::Step { track, step, on } => push_edit!(SeqEdit::SetStep { track, step, on }),
+                    Action::StepParams { track, step, on, vel, accent, prob, rat, micro, cond, ra, rb } => {
+                        push_edit!(SeqEdit::StepParams { track, step, on, vel, accent, prob, rat, micro, cond, ra, rb })
                     }
-                    Action::Transport { play } => {
-                        internal_play.store(play, Ordering::Relaxed);
+                    Action::SetPlock { track, step, param, value } => {
+                        push_edit!(SeqEdit::SetPlock { track, step, param, value })
                     }
-                    Action::SeqEnable { on } => {
-                        seq_enabled.store(on, Ordering::Relaxed);
+                    Action::ClearPlock { track, step, param } => {
+                        push_edit!(SeqEdit::ClearPlock { track, step, param })
                     }
+                    Action::ClearLane { track } => push_edit!(SeqEdit::ClearLane { track }),
+                    Action::Euclid { track, pulses, rotate } => {
+                        push_edit!(SeqEdit::Euclid { track, pulses, rotate })
+                    }
+                    Action::Fill { on } => push_edit!(SeqEdit::Fill { on }),
+                    Action::SelectPattern { idx } => push_edit!(SeqEdit::SelectPattern { idx }),
+                    Action::Swing { value } => push_edit!(SeqEdit::Swing { value }),
+                    Action::Humanize { value } => push_edit!(SeqEdit::Humanize { value }),
+                    Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
+                    Action::SeqEnable { on } => seq_enabled.store(on, Ordering::Relaxed),
                 }
             }
 
-            // Publish playhead + voice LEDs + transport state, only on change.
+            // Publish playhead + voice LEDs + transport + current pattern, on change.
             let ph = playhead.load(Ordering::Relaxed);
             let va = voice_active.load(Ordering::Relaxed);
-            // Effective state (host OR internal) so the indicator tracks the host.
             let playing = effective_playing.load(Ordering::Relaxed);
             let seq_on = seq_enabled.load(Ordering::Relaxed);
-            let packed = ((seq_on as u32) << 21)
+            let pat = cur_pattern.load(Ordering::Relaxed);
+            let packed = ((pat as u32) << 24)
+                | ((seq_on as u32) << 21)
                 | ((playing as u32) << 20)
                 | (((va as u32) & 0xFFF) << 8)
                 | (((ph + 1) as u32) & 0xFF);
@@ -249,6 +305,7 @@ impl Plugin for Drumlin {
                     "voices": va,
                     "playing": playing,
                     "seq": seq_on,
+                    "pattern": pat,
                 }));
             }
         });
@@ -285,10 +342,40 @@ impl Plugin for Drumlin {
             self.kit.reset();
         }
 
-        // Once per block: apply queued grid edits from the GUI.
-        while let Ok(packed) = self.edit_rx.pop() {
-            let (track, step, on) = unpack_step(packed);
-            self.seq.set_step(track, step, on);
+        // Once per block: apply queued sequencer edits from the GUI.
+        while let Ok(ed) = self.edit_rx.pop() {
+            match ed {
+                SeqEdit::SetStep { track, step, on } => {
+                    self.seq.set_step(track as usize, step as usize, on)
+                }
+                SeqEdit::StepParams { track, step, on, vel, accent, prob, rat, micro, cond, ra, rb } => {
+                    self.seq.set_step_params(
+                        track as usize,
+                        step as usize,
+                        on,
+                        vel,
+                        accent,
+                        prob,
+                        rat,
+                        micro,
+                        TrigCondition::from_code(cond, ra, rb),
+                    )
+                }
+                SeqEdit::SetPlock { track, step, param, value } => {
+                    self.seq.set_plock(track as usize, step as usize, param, value)
+                }
+                SeqEdit::ClearPlock { track, step, param } => {
+                    self.seq.clear_plock(track as usize, step as usize, param)
+                }
+                SeqEdit::ClearLane { track } => self.seq.clear_lane(track as usize),
+                SeqEdit::Euclid { track, pulses, rotate } => {
+                    self.seq.euclid(track as usize, pulses, rotate)
+                }
+                SeqEdit::Fill { on } => self.seq.set_fill(on),
+                SeqEdit::SelectPattern { idx } => self.seq.select_pattern(idx as usize),
+                SeqEdit::Swing { value } => self.seq.set_swing(value),
+                SeqEdit::Humanize { value } => self.seq.set_humanize(value),
+            }
         }
 
         // Once per block, at sample 0: local pad audition (drums are one-shots,
@@ -398,6 +485,7 @@ impl Plugin for Drumlin {
             }
         }
         self.voice_active.store(mask, Ordering::Relaxed);
+        self.cur_pattern.store(self.seq.current_pattern() as u8, Ordering::Relaxed);
 
         ProcessStatus::KeepAlive
     }

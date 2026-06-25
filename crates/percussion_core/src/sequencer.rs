@@ -35,6 +35,29 @@ impl Default for TrigCondition {
 }
 
 impl TrigCondition {
+    /// Compact code for the GUI/edit protocol.
+    pub fn code(self) -> u8 {
+        match self {
+            TrigCondition::Always => 0,
+            TrigCondition::Fill => 1,
+            TrigCondition::NotFill => 2,
+            TrigCondition::First => 3,
+            TrigCondition::NotFirst => 4,
+            TrigCondition::Ratio { .. } => 5,
+        }
+    }
+
+    pub fn from_code(code: u8, a: u8, b: u8) -> Self {
+        match code {
+            1 => TrigCondition::Fill,
+            2 => TrigCondition::NotFill,
+            3 => TrigCondition::First,
+            4 => TrigCondition::NotFirst,
+            5 => TrigCondition::Ratio { a: a.max(1), b: b.max(1) },
+            _ => TrigCondition::Always,
+        }
+    }
+
     fn passes(self, loop_index: u64, fill_active: bool) -> bool {
         match self {
             TrigCondition::Always => true,
@@ -251,6 +274,9 @@ fn ratchet_velocity(base: f32, k: u8, n: u8, ramp: i8) -> f32 {
 const MAX_PENDING: usize = 256;
 const MAX_CARRY: usize = 128;
 
+/// Pattern bank size (design §4.2 "16 slots"). Song chaining queues the next.
+pub const N_PATTERNS: usize = 16;
+
 #[derive(Clone, Copy)]
 struct Carried {
     /// Samples until fire, measured from the start of the next block processed.
@@ -261,7 +287,15 @@ struct Carried {
 /// The runtime sequencer. Lives on the audio thread; edits arrive from the GUI
 /// via the plugin's lock-free edit ring.
 pub struct Sequencer {
+    /// The live, currently-playing pattern (the hot path reads this directly).
     pub pattern: Pattern,
+    /// The 16-slot pattern bank (heap-backed: a `Pattern` is ~37 KB, so the bank
+    /// would blow the stack inline). Allocated once at construction; the audio
+    /// thread only indexes/copies into it (no allocation), so it stays RT-safe.
+    bank: Vec<Pattern>,
+    current: usize,
+    /// Pattern queued to switch in at the next loop boundary (song chaining).
+    queued: Option<usize>,
     playing: bool,
     /// Continuous absolute step position (re-anchored to the host each block).
     playhead_steps: f64,
@@ -281,6 +315,9 @@ impl Default for Sequencer {
 impl Sequencer {
     pub fn new() -> Self {
         let pattern = Pattern::neutral_demo();
+        // vec! builds directly on the heap (no giant stack temporary).
+        let mut bank = vec![Pattern::default(); N_PATTERNS];
+        bank[0] = pattern;
         let empty = Trigger {
             offset: 0,
             track: 0,
@@ -291,6 +328,9 @@ impl Sequencer {
         };
         Self {
             pattern,
+            bank,
+            current: 0,
+            queued: None,
             playing: false,
             playhead_steps: 0.0,
             prev_floor: -1,
@@ -341,6 +381,138 @@ impl Sequencer {
 
     pub fn step_on(&self, track: usize, step: usize) -> bool {
         track < MAX_TRACKS && step < MAX_STEPS && self.pattern.tracks[track].steps[step].on
+    }
+
+    /// Read a step (for the GUI to populate its inspector / cell visuals).
+    pub fn step(&self, track: usize, step: usize) -> Option<&Step> {
+        if track < MAX_TRACKS && step < MAX_STEPS {
+            Some(&self.pattern.tracks[track].steps[step])
+        } else {
+            None
+        }
+    }
+
+    /// Set a step's full performance payload (from the GUI step inspector).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_step_params(
+        &mut self,
+        track: usize,
+        step: usize,
+        on: bool,
+        velocity: u8,
+        accent: bool,
+        probability: u8,
+        ratchet: u8,
+        micro: i16,
+        condition: TrigCondition,
+    ) {
+        if track >= MAX_TRACKS || step >= MAX_STEPS {
+            return;
+        }
+        let s = &mut self.pattern.tracks[track].steps[step];
+        s.on = on;
+        s.velocity = velocity.min(127);
+        s.accent = accent;
+        s.probability = probability.min(100);
+        s.ratchet = ratchet.clamp(1, 8);
+        s.micro = micro;
+        s.condition = condition;
+    }
+
+    pub fn set_plock(&mut self, track: usize, step: usize, param: u16, value: f32) {
+        if track < MAX_TRACKS && step < MAX_STEPS {
+            self.pattern.tracks[track].steps[step].set_plock(param, value);
+        }
+    }
+
+    pub fn clear_plock(&mut self, track: usize, step: usize, param: u16) {
+        if track < MAX_TRACKS && step < MAX_STEPS {
+            self.pattern.tracks[track].steps[step].clear_plock(param);
+        }
+    }
+
+    pub fn clear_lane(&mut self, track: usize) {
+        if track < MAX_TRACKS {
+            let length = self.pattern.tracks[track].length;
+            self.pattern.tracks[track] = Track { length, ..Track::default() };
+        }
+    }
+
+    /// Generate a Euclidean rhythm on a lane: `pulses` hits spread as evenly as
+    /// possible over the lane length, rotated by `rotate` (design §4.4).
+    pub fn euclid(&mut self, track: usize, pulses: u8, rotate: u8) {
+        if track >= MAX_TRACKS {
+            return;
+        }
+        let len = self.pattern.tracks[track].length.max(1) as usize;
+        for s in 0..MAX_STEPS {
+            self.pattern.tracks[track].steps[s].on = false;
+        }
+        let k = (pulses as usize).min(len);
+        if k == 0 {
+            return;
+        }
+        for i in 0..k {
+            let pos = (i * len) / k; // even Euclidean distribution
+            let pos = (pos + rotate as usize) % len;
+            let s = &mut self.pattern.tracks[track].steps[pos];
+            s.on = true;
+            if s.velocity == 0 {
+                s.velocity = 105;
+            }
+        }
+    }
+
+    pub fn set_swing(&mut self, swing: u8) {
+        self.pattern.swing = swing.clamp(50, 75);
+    }
+
+    pub fn set_humanize(&mut self, humanize: u8) {
+        self.pattern.humanize = humanize.min(100);
+    }
+
+    pub fn set_groove_amount(&mut self, amount: u8) {
+        self.pattern.groove_amount = amount.min(100);
+    }
+
+    // --- pattern bank / song chaining ---
+    pub fn current_pattern(&self) -> usize {
+        self.current
+    }
+
+    pub fn queued_pattern(&self) -> Option<usize> {
+        self.queued
+    }
+
+    /// Which bank slots have any active step (for the GUI selector dots).
+    pub fn pattern_used(&self, idx: usize) -> bool {
+        let p = if idx == self.current {
+            &self.pattern
+        } else if idx < N_PATTERNS {
+            &self.bank[idx]
+        } else {
+            return false;
+        };
+        p.tracks
+            .iter()
+            .any(|t| t.steps[..(t.length as usize).min(MAX_STEPS)].iter().any(|s| s.on))
+    }
+
+    /// Select a pattern: queued to switch at the next loop while playing, or
+    /// immediately when stopped (so the GUI updates at once).
+    pub fn select_pattern(&mut self, idx: usize) {
+        if idx >= N_PATTERNS || idx == self.current {
+            self.queued = None;
+            return;
+        }
+        if self.playing {
+            self.queued = Some(idx);
+        } else {
+            self.bank[self.current] = self.pattern;
+            self.current = idx;
+            self.pattern = self.bank[self.current];
+            self.queued = None;
+        }
     }
 
     pub fn reset_playhead(&mut self) {
@@ -410,6 +582,15 @@ impl Sequencer {
         samples_per_step: f64,
         samples_per_micro_tick: f64,
     ) {
+        // At a loop boundary, switch in any queued pattern (song chaining).
+        let plen0 = self.pattern.length.max(1) as i64;
+        if fl.rem_euclid(plen0) == 0 {
+            if let Some(q) = self.queued.take() {
+                self.bank[self.current] = self.pattern;
+                self.current = q.min(N_PATTERNS - 1);
+                self.pattern = self.bank[self.current];
+            }
+        }
         let plen = self.pattern.length.max(1) as i64;
         // Conditions evaluate against the pattern-loop epoch (the song loop),
         // even for polymeter tracks that wrap on their own length. The GROOVE
@@ -784,6 +965,45 @@ mod tests {
             track5_groove(true),
             "track 5's groove must be independent of an edit on track 9"
         );
+    }
+
+    #[test]
+    fn euclid_distributes_and_rotates() {
+        let mut seq = Sequencer::new();
+        seq.pattern = Pattern::default();
+        seq.euclid(5, 4, 0);
+        let on: Vec<usize> = (0..16).filter(|&s| seq.step_on(5, s)).collect();
+        assert_eq!(on, vec![0, 4, 8, 12], "4 pulses over 16, evenly spread");
+        seq.euclid(5, 4, 2);
+        let rot: Vec<usize> = (0..16).filter(|&s| seq.step_on(5, s)).collect();
+        assert_eq!(rot, vec![2, 6, 10, 14], "rotated by 2");
+    }
+
+    #[test]
+    fn pattern_switch_stopped_is_immediate_and_preserves_slots() {
+        let mut seq = Sequencer::new();
+        seq.select_pattern(3);
+        assert_eq!(seq.current_pattern(), 3, "stopped switch is immediate");
+        seq.set_step(0, 1, true); // edit slot 3
+        seq.select_pattern(0);
+        assert!(seq.step_on(0, 0), "slot 0 (neutral_demo) preserved");
+        assert!(!seq.step_on(0, 1), "slot 3's edit didn't leak into slot 0");
+        seq.select_pattern(3);
+        assert!(seq.step_on(0, 1), "slot 3's edit was preserved");
+    }
+
+    #[test]
+    fn pattern_switch_playing_is_queued_to_loop_boundary() {
+        let mut seq = Sequencer::new();
+        seq.set_playing(true);
+        let sr = 48_000.0;
+        let bar = (4.0 * 0.5 * sr) as usize;
+        seq.process_block(0.0, 120.0, sr, bar / 2); // half a loop
+        seq.select_pattern(2);
+        assert_eq!(seq.current_pattern(), 0, "still on 0 mid-loop");
+        assert_eq!(seq.queued_pattern(), Some(2));
+        seq.process_block(2.0, 120.0, sr, bar); // crosses the loop boundary
+        assert_eq!(seq.current_pattern(), 2, "switched at the loop boundary");
     }
 
     #[test]
