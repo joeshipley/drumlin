@@ -11,13 +11,15 @@
 use nih_plug::prelude::*;
 use nih_plug_webview::{HTMLSource, WebViewEditor};
 use rtrb::{Consumer, Producer, RingBuffer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use percussion_core::{track_for_note, DrumKit, Pattern, Sequencer, TrigCondition, MAX_TRACKS};
+use percussion_core::{
+    track_for_note, DrumKit, Pattern, SeqState, Sequencer, TrigCondition, MAX_STEPS, MAX_TRACKS,
+};
 
 const EDITOR_WIDTH: u32 = 1100;
 const EDITOR_HEIGHT: u32 = 800;
@@ -86,6 +88,27 @@ struct DrumlinParams {
     /// Tape/stereo delay mix.
     #[id = "delay"]
     delay: FloatParam,
+
+    /// Out-of-band state the host can't reach through plain params: the full
+    /// pattern bank (steps, p-locks, grooves) and the SEQ master-enable.
+    /// `nih-plug` serializes this `Arc<Mutex<_>>` with the plugin state, so a
+    /// saved project restores the user's programming. (The FX macros — pump,
+    /// drive, reverb, delay, gain — are ordinary params the host persists itself.)
+    #[persist = "drumlin_state"]
+    state: Arc<Mutex<PersistState>>,
+}
+
+/// The host-persisted song state: the pattern bank plus the SEQ enable.
+#[derive(Clone, Serialize, Deserialize)]
+struct PersistState {
+    seq: SeqState,
+    seq_enabled: bool,
+}
+
+impl Default for PersistState {
+    fn default() -> Self {
+        Self { seq: SeqState::default(), seq_enabled: true }
+    }
 }
 
 impl Default for DrumlinParams {
@@ -120,6 +143,7 @@ impl Default for DrumlinParams {
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
+            state: Arc::new(Mutex::new(PersistState::default())),
         }
     }
 }
@@ -165,6 +189,14 @@ pub struct Drumlin {
 
     /// KIT/preset/pattern panic-reset flag, drained at block start.
     fx_reset_pending: Arc<AtomicBool>,
+
+    /// Set when a sequencer edit lands; the next block snapshots the bank into
+    /// the persisted state via a non-blocking `try_lock`, so the audio thread
+    /// never stalls on the host's save.
+    seq_dirty: bool,
+    /// Last SEQ-enable value mirrored into the persisted state, so a toggle (no
+    /// step edit) still re-snapshots.
+    persisted_seq_enabled: bool,
 }
 
 impl Default for Drumlin {
@@ -190,6 +222,8 @@ impl Default for Drumlin {
             effective_playing: Arc::new(AtomicBool::new(false)),
             seq_enabled: Arc::new(AtomicBool::new(true)),
             fx_reset_pending: Arc::new(AtomicBool::new(false)),
+            seq_dirty: false,
+            persisted_seq_enabled: true,
         }
     }
 }
@@ -197,47 +231,59 @@ impl Default for Drumlin {
 /// JSON of the initial Neutral demo grid (slot 0). The GUI mirrors the bank
 /// locally from here + applies its own edits, so it stays in sync without the
 /// audio thread pushing 16 patterns back.
-fn grid_json() -> serde_json::Value {
-    let p = Pattern::neutral_demo();
-    let len = p.length as usize;
-    let cells: Vec<Vec<serde_json::Value>> = (0..MAX_TRACKS)
-        .map(|t| {
-            (0..len)
-                .map(|s| {
-                    let st = &p.tracks[t].steps[s];
-                    let (cond, ra, rb) = match st.condition {
-                        TrigCondition::Ratio { a, b } => (5u8, a, b),
-                        other => (other.code(), 1u8, 2u8),
-                    };
-                    let plocks: Vec<serde_json::Value> = st
-                        .plocks()
-                        .iter()
-                        .map(|pl| json!({ "param": pl.param, "value": pl.value }))
-                        .collect();
-                    json!({
-                        "on": st.on,
-                        "vel": st.velocity,
-                        "accent": st.accent,
-                        "prob": st.probability,
-                        "rat": st.ratchet,
-                        "ramp": st.ratchet_ramp,
-                        "micro": st.micro,
-                        "cond": cond,
-                        "ra": ra,
-                        "rb": rb,
-                        "plocks": plocks,
-                    })
-                })
-                .collect()
+/// Sparse cells for one pattern: only steps that sound or carry a p-lock, each
+/// tagged with its `(t, s)`. The GUI blanks its bank then applies these, so the
+/// payload scales with content, not with 12×64 empty cells per pattern.
+fn pattern_cells(p: &Pattern) -> Vec<serde_json::Value> {
+    let len = (p.length as usize).min(MAX_STEPS);
+    let mut out = Vec::new();
+    for t in 0..MAX_TRACKS {
+        for s in 0..len {
+            let st = &p.tracks[t].steps[s];
+            if !st.on && st.plock_count == 0 {
+                continue;
+            }
+            let (cond, ra, rb) = match st.condition {
+                TrigCondition::Ratio { a, b } => (5u8, a, b),
+                other => (other.code(), 1u8, 2u8),
+            };
+            let plocks: Vec<serde_json::Value> = st
+                .plocks()
+                .iter()
+                .map(|pl| json!({ "param": pl.param, "value": pl.value }))
+                .collect();
+            out.push(json!({
+                "t": t, "s": s,
+                "on": st.on, "vel": st.velocity, "accent": st.accent,
+                "prob": st.probability, "rat": st.ratchet, "ramp": st.ratchet_ramp,
+                "micro": st.micro, "cond": cond, "ra": ra, "rb": rb, "plocks": plocks,
+            }));
+        }
+    }
+    out
+}
+
+/// The full bank, for seeding the GUI on open (and after a host project load,
+/// since the editor refetches via `Init`). Reads the persisted/live `SeqState`,
+/// so the grid the user sees always matches what the engine will play.
+fn bank_json(seq: &SeqState) -> serde_json::Value {
+    let patterns: Vec<serde_json::Value> = seq
+        .patterns
+        .iter()
+        .map(|p| {
+            json!({
+                "length": p.length,
+                "swing": p.swing,
+                "humanize": p.humanize,
+                "cells": pattern_cells(p),
+            })
         })
         .collect();
     json!({
         "type": "grid",
-        "length": p.length,
         "tracks": MAX_TRACKS,
-        "swing": p.swing,
-        "humanize": p.humanize,
-        "cells": cells,
+        "current": seq.current,
+        "patterns": patterns,
     })
 }
 
@@ -318,7 +364,13 @@ impl Plugin for Drumlin {
                     continue;
                 };
                 match action {
-                    Action::Init => ctx.send_json(grid_json()),
+                    Action::Init => {
+                        // Seed the GUI from the persisted/live bank so it shows
+                        // exactly what the engine holds (incl. a restored project).
+                        if let Ok(s) = params.state.lock() {
+                            ctx.send_json(bank_json(&s.seq));
+                        }
+                    }
                     Action::Note { on, note } => {
                         if let Ok(mut tx) = kbd_tx.lock() {
                             if let Some(tx) = tx.as_mut() {
@@ -395,6 +447,16 @@ impl Plugin for Drumlin {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.kit.set_sample_rate(buffer_config.sample_rate);
+        // Adopt any host-restored project state (the pattern bank + SEQ enable).
+        // Skipped if a step edit is still un-snapshotted (`seq_dirty`), so a
+        // mid-session sample-rate re-init can't clobber unsaved programming.
+        if !self.seq_dirty {
+            if let Ok(state) = self.params.state.try_lock() {
+                self.seq.import(&state.seq);
+                self.seq_enabled.store(state.seq_enabled, Ordering::Relaxed);
+                self.persisted_seq_enabled = state.seq_enabled;
+            }
+        }
         true
     }
 
@@ -418,6 +480,7 @@ impl Plugin for Drumlin {
 
         // Once per block: apply queued sequencer edits from the GUI.
         while let Ok(ed) = self.edit_rx.pop() {
+            self.seq_dirty = true; // a step changed -> re-snapshot for persistence
             match ed {
                 SeqEdit::SetStep { track, step, on } => {
                     self.seq.set_step(track as usize, step as usize, on)
@@ -449,6 +512,20 @@ impl Plugin for Drumlin {
                 SeqEdit::SelectPattern { idx } => self.seq.select_pattern(idx as usize),
                 SeqEdit::Swing { value } => self.seq.set_swing(value),
                 SeqEdit::Humanize { value } => self.seq.set_humanize(value),
+            }
+        }
+
+        // Snapshot the bank into the host-persisted state whenever it (or the
+        // SEQ enable) changed. `try_lock` is non-blocking and `export_into` is
+        // allocation-free, so this stays real-time safe; if the host happens to
+        // be serializing for a save right now, we simply retry next block.
+        let seq_on = self.seq_enabled.load(Ordering::Relaxed);
+        if self.seq_dirty || seq_on != self.persisted_seq_enabled {
+            if let Ok(mut state) = self.params.state.try_lock() {
+                self.seq.export_into(&mut state.seq);
+                state.seq_enabled = seq_on;
+                self.seq_dirty = false;
+                self.persisted_seq_enabled = seq_on;
             }
         }
 
@@ -589,3 +666,38 @@ impl ClapPlugin for Drumlin {
 
 // VST3 intentionally NOT exported (GPL vst3-sys). CLAP + AU only. See plan §7.1.
 nih_export_clap!(Drumlin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real persistence path: program a bank, JSON round-trip the persisted
+    /// blob (exactly what `nih-plug` serializes into the host project), and
+    /// confirm every kind of programming survives — including the `[Step; 64]`
+    /// arrays that go through `serde_big_array`.
+    #[test]
+    fn persist_state_round_trips_through_json() {
+        let mut seq = Sequencer::new();
+        seq.select_pattern(5);
+        seq.set_step(7, 13, true);
+        seq.set_plock(7, 13, percussion_core::LockableParam::Resonance.index(), 0.77);
+        seq.set_step(7, 63, true); // last step in the 64-wide lane (the BigArray edge)
+        seq.select_pattern(0);
+        seq.set_step(1, 2, true);
+
+        let mut persisted = PersistState { seq: SeqState::default(), seq_enabled: false };
+        seq.export_into(&mut persisted.seq);
+
+        let json = serde_json::to_string(&persisted).expect("serialize");
+        let back: PersistState = serde_json::from_str(&json).expect("deserialize");
+        assert!(!back.seq_enabled, "SEQ-enable must survive");
+
+        let mut restored = Sequencer::new();
+        restored.import(&back.seq);
+        assert!(restored.step_on(1, 2), "slot 0 edit survives");
+        restored.select_pattern(5);
+        assert!(restored.step_on(7, 13), "slot 5 edit survives");
+        assert!(restored.step_on(7, 63), "step 63 (BigArray edge) survives");
+        assert_eq!(restored.pattern.tracks[7].steps[13].plock_count, 1, "p-lock survives");
+    }
+}

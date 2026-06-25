@@ -6,9 +6,20 @@ license.workspace = true
 rust-version.workspace = true
 
 # Drum voices + sequencer. Depends only on the shared DSP primitives; no plugin
-# or host types, so it tests in milliseconds.
+# or host types, so it tests in milliseconds. The default build is
+# dependency-free; `serde` is an OPT-IN feature (the plugin enables it) so
+# pattern state can persist, without slowing the core's own tests.
 [dependencies]
 # The shared, dependency-free family DSP core (oscillators, filters, envelopes,
 # drive, reverb, dynamics, mod-matrix, denormal util), shared with Esker. Pinned
 # to a rev so builds are reproducible; bump the rev to pull upstream fixes.
 synth_core = { git = "ssh://git@github.com/joeshipley/synth_core.git", rev = "eba0e714b8e7048c462976d61516f54b19b9375e" }
+
+# Optional: derive serde on the pattern POD types so the plugin can persist the
+# pattern bank. serde_big_array covers the [Step; 64] array (serde's native impls
+# stop at 32). Off by default -> the core stays dependency-free for fast tests.
+serde = { version = "1.0", optional = true, features = ["derive"] }
+serde-big-array = { version = "0.5", optional = true }
+
+[features]
+serde = ["dep:serde", "dep:serde-big-array"]

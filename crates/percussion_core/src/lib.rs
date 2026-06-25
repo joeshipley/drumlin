@@ -33,7 +33,7 @@ pub use pitch_env::DahdEnv;
 pub use plock::{LockableParam, PLock, LOCKABLE_PARAMS, MAX_PLOCKS};
 pub use resonator::Resonator;
 pub use rng::XorShift32;
-pub use sequencer::{GrooveTemplate, Pattern, Sequencer, Step, Track, TrigCondition};
+pub use sequencer::{GrooveTemplate, Pattern, SeqState, Sequencer, Step, Track, TrigCondition};
 pub use tail::VoiceTail;
 pub use voice::Voice;
 

@@ -18,6 +18,7 @@ pub const MAX_PLOCKS: usize = 4;
 /// One per-step parameter lock: `param` indexes [`LOCKABLE_PARAMS`], `value` is
 /// normalized `0.0..=1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PLock {
     pub param: u16,
     pub value: f32,

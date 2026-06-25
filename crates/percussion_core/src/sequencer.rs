@@ -18,6 +18,7 @@ use crate::{Trigger, MAX_STEPS, MAX_TRACKS};
 
 /// Conditional trig (design §4.3). `Pre`/`Neighbor` are deferred ("Later").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrigCondition {
     Always,
     Fill,
@@ -77,6 +78,7 @@ impl TrigCondition {
 /// Microtiming + accent feel layered over swing (design §4.2). Minimal set for
 /// M5 part 1; the full library lands in part 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GrooveTemplate {
     Straight,
     Mpc16,
@@ -113,6 +115,7 @@ impl GrooveTemplate {
 
 /// One step on one track. Fixed-size, `Copy`, no heap (design §4.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Step {
     pub on: bool,
     pub velocity: u8, // 0..=127
@@ -179,7 +182,10 @@ impl Step {
 
 /// One drum track's lane. `length` < pattern length gives polymeter (design §4.2).
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
+    // serde's native array impls stop at 32; BigArray covers [Step; 64].
+    #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
     pub steps: [Step; MAX_STEPS],
     pub length: u8,
     pub muted: bool,
@@ -202,6 +208,7 @@ impl Default for Track {
 /// A pattern binds the tracks plus global feel. `Copy`, so an undo snapshot is
 /// one memcpy (design §4.4).
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Pattern {
     pub tracks: [Track; MAX_TRACKS],
     pub length: u8,        // active steps, 1..=64
@@ -276,6 +283,27 @@ const MAX_CARRY: usize = 128;
 
 /// Pattern bank size (design §4.2 "16 slots"). Song chaining queues the next.
 pub const N_PATTERNS: usize = 16;
+
+/// The persistable slice of sequencer state: the full 16-pattern bank plus the
+/// selected slot. The plugin serializes this into its `#[persist]` field so a
+/// saved host project restores every programmed step, p-lock and groove.
+/// Playback state (playhead, carry, queued switch) is transient and excluded.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SeqState {
+    pub patterns: Vec<Pattern>,
+    pub current: u8,
+}
+
+impl Default for SeqState {
+    fn default() -> Self {
+        // A fresh instance carries the Neutral demo groove, matching `Sequencer::new`,
+        // so an un-saved plugin still boots with a playable pattern.
+        let mut patterns = vec![Pattern::default(); N_PATTERNS];
+        patterns[0] = Pattern::neutral_demo();
+        Self { patterns, current: 0 }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Carried {
@@ -522,6 +550,29 @@ impl Sequencer {
         self.carry_len = 0;
     }
 
+    /// Snapshot the live bank into `state` for persistence. Allocation-free when
+    /// `state` is already sized to the bank (the `Default`), so it is safe to
+    /// call from the audio thread under a non-blocking `try_lock`.
+    pub fn export_into(&self, state: &mut SeqState) {
+        if state.patterns.len() != N_PATTERNS {
+            return; // never reallocate on the audio thread
+        }
+        state.patterns[..N_PATTERNS].copy_from_slice(&self.bank[..N_PATTERNS]);
+        // the edited slot lives in `self.pattern`, not yet flushed to the bank.
+        state.patterns[self.current] = self.pattern;
+        state.current = self.current as u8;
+    }
+
+    /// Adopt a persisted bank (host project load) and rewind to the top.
+    pub fn import(&mut self, state: &SeqState) {
+        let n = state.patterns.len().min(N_PATTERNS);
+        self.bank[..n].copy_from_slice(&state.patterns[..n]);
+        self.current = (state.current as usize).min(N_PATTERNS - 1);
+        self.pattern = self.bank[self.current];
+        self.queued = None;
+        self.reset_playhead();
+    }
+
     /// Walk one process block. `pos_qn` is the transport position (quarter notes)
     /// at the block's first sample. Fills `pending` (sorted by offset) with the
     /// triggers that fire in this block. Allocation-free.
@@ -739,6 +790,37 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_import_round_trips_the_bank() {
+        let mut seq = Sequencer::new();
+        // edit slot 2 (a p-locked step), then a step on the default slot 0.
+        seq.select_pattern(2);
+        seq.set_step(0, 5, true);
+        seq.set_plock(0, 5, crate::LockableParam::Cutoff.index(), 0.42);
+        seq.select_pattern(0);
+        seq.set_step(3, 7, true);
+
+        let mut state = SeqState::default();
+        seq.export_into(&mut state);
+        assert_eq!(state.current, 0);
+
+        let mut restored = Sequencer::new();
+        restored.import(&state);
+        assert!(restored.step_on(3, 7), "slot 0 edit must survive");
+
+        restored.select_pattern(2);
+        assert!(restored.step_on(0, 5), "slot 2 edit must survive");
+        assert_eq!(restored.pattern.tracks[0].steps[5].plock_count, 1, "p-lock must survive");
+    }
+
+    #[test]
+    fn export_into_is_allocation_free_and_skips_a_mis_sized_buffer() {
+        let seq = Sequencer::new();
+        let mut wrong = SeqState { patterns: vec![Pattern::default(); 4], current: 0 };
+        seq.export_into(&mut wrong); // must not panic / reallocate
+        assert_eq!(wrong.patterns.len(), 4, "a mis-sized buffer is left untouched");
+    }
 
     fn collect(seq: &mut Sequencer, tempo: f64, sr: f64, block: usize, blocks: usize) -> Vec<Trigger> {
         let mut all = Vec::new();

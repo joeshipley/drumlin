@@ -389,17 +389,20 @@
   window.onPluginMessage = function (msg) {
     if (!msg || !msg.type) return;
     if (msg.type === "grid") {
-      LENGTH = msg.length;
+      // Full-bank seed: every pattern slot, sparse (only sounding / p-locked
+      // steps), so a restored host project shows up across all 16 slots.
+      const pats = msg.patterns || [];
       bank = Array.from({length: N_PATTERNS}, blankPat);
-      for (let t = 0; t < N_TRACKS; t++) for (let s = 0; s < LENGTH; s++) {
-        const c = (msg.cells[t] || [])[s];
-        if (c) {
+      for (let p = 0; p < pats.length && p < N_PATTERNS; p++) {
+        (pats[p].cells || []).forEach(c => {
           const plk = {};
-          (c.plocks || []).forEach(p => { plk[p.param] = p.value; });
-          bank[0][t][s] = { on: !!c.on, vel: c.vel, accent: !!c.accent, prob: c.prob, rat: c.rat, ramp: c.ramp || 0, cond: c.cond, ra: c.ra || 1, rb: c.rb || 2, micro: c.micro || 0, plk };
-        }
+          (c.plocks || []).forEach(x => { plk[x.param] = x.value; });
+          bank[p][c.t][c.s] = { on: !!c.on, vel: c.vel, accent: !!c.accent, prob: c.prob, rat: c.rat, ramp: c.ramp || 0, cond: c.cond, ra: c.ra || 1, rb: c.rb || 2, micro: c.micro || 0, plk };
+        });
       }
-      swing = msg.swing; human = msg.humanize;
+      cur = msg.current || 0;
+      const cp = pats[cur] || { length: 16, swing: 50, humanize: 0 };
+      LENGTH = cp.length; swing = cp.swing; human = cp.humanize;
       swingEl.value = swing; swingV.textContent = swing; humanEl.value = human; humanV.textContent = human;
       buildGrid(); renderInsp(); refreshPats();
     } else if (msg.type === "status") {

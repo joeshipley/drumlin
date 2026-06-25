@@ -27,7 +27,7 @@ path = "src/main.rs"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["assert_process_allocs", "standalone"] }
 
 # The shared family DSP (copied from Esker). Zero external deps.
-percussion_core = { path = "../percussion_core" }
+percussion_core = { path = "../percussion_core", features = ["serde"] }
 
 # Custom webview-based editor. Vendored copy of the same fork Esker uses, patched
 # to drop nih-plug's vst3 feature. Declares `nih_plug` from robbert-vdh's repo
