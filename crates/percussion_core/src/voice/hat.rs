@@ -46,6 +46,12 @@ impl HatVoice {
         Self::make(sr, 380.0, 7000.0)
     }
 
+    /// Ride cymbal — same metallic engine, long decay and a lower high-pass so
+    /// more body comes through. Not choke-grouped.
+    pub fn ride(sr: f32) -> Self {
+        Self::make(sr, 700.0, 4500.0)
+    }
+
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sr = sr;
         self.cluster.set_sample_rate(sr);

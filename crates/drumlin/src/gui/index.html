@@ -74,7 +74,7 @@
   .hdr-num.play { color: var(--accent); }
 
   .footer { height: 96px; flex: 0 0 96px; display: flex; align-items: center; gap: 18px; padding: 0 16px; background: linear-gradient(0deg, #15171C, #101216); border-top: 1px solid var(--border); }
-  .pads { display: grid; grid-template-columns: repeat(4, 44px); grid-template-rows: repeat(2, 34px); gap: 6px; }
+  .pads { display: grid; grid-template-columns: repeat(4, 46px); grid-template-rows: repeat(3, 26px); gap: 5px; }
   .pad { border-radius: 6px; background: var(--raise); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 7.5px; letter-spacing: 0.5px; color: var(--dim); cursor: pointer; text-align: center; }
   .pad.live { color: var(--text-2); }
   .pad.silent { color: var(--dim-5); cursor: default; }
@@ -91,6 +91,7 @@
         <div class="sub">RHYTHM SIBLING TO ESKER</div>
       </div>
       <div class="chip play" id="play">▶ PLAY</div>
+      <div class="chip play on" id="seq" title="Internal step sequencer. Off = play Drumlin purely from MIDI notes / pads.">SEQ</div>
       <div class="chip"><b id="bpm">120.0</b> BPM</div>
       <div class="chip">SWING <b>50</b></div>
       <div class="chip">LEN <b id="len">16</b></div>
@@ -124,8 +125,8 @@
 
 <script>
   // Track 0..11 layout (design §3.2). Active (sounding) tracks in M2:
-  const LANES = ["KICK","KICK2","SNARE","CLAP","RIM","CL HAT","OP HAT","RIDE","TOM LO","TOM HI","PERC","SAMPLE"];
-  const ACTIVE = new Set([0, 2, 3, 5, 6]);
+  const LANES = ["KICK","SUB","SNARE","CLAP","RIM","CL HAT","OP HAT","RIDE","TOM LO","TOM HI","COWBELL","ZAP"];
+  const ACTIVE = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]); // all 12 voiced at M4
   const N_TRACKS = LANES.length;
   let LENGTH = 16;
   let grid = Array.from({ length: N_TRACKS }, () => Array(64).fill(false));
@@ -212,9 +213,9 @@
 
   // ---- pad bank: first 5 pads map to the M2 voices ----
   const PADS = [
-    { name: "KICK", note: 36 }, { name: "SNARE", note: 38 },
-    { name: "CLAP", note: 39 }, { name: "CL HAT", note: 42 },
-    { name: "OP HAT", note: 46 }, null, null, null,
+    { name: "KICK", note: 36 }, { name: "SUB", note: 35 }, { name: "SNARE", note: 38 }, { name: "CLAP", note: 39 },
+    { name: "RIM", note: 37 }, { name: "CL HAT", note: 42 }, { name: "OP HAT", note: 46 }, { name: "RIDE", note: 51 },
+    { name: "TOM LO", note: 45 }, { name: "TOM HI", note: 50 }, { name: "COWBL", note: 56 }, { name: "ZAP", note: 60 },
   ];
   const padsEl = document.getElementById("pads");
   PADS.forEach((p) => {
@@ -235,6 +236,12 @@
 
   playBtn.addEventListener("click", () => { setPlaying(!playing); send({ type: "transport", play: playing }); });
 
+  // ---- SEQ enable: groovebox (grid runs) vs. pure MIDI/pad-driven ----
+  const seqBtn = document.getElementById("seq");
+  let seqOn = true;
+  function setSeq(on) { seqOn = on; seqBtn.classList.toggle("on", on); }
+  seqBtn.addEventListener("click", () => { setSeq(!seqOn); send({ type: "seq-enable", on: seqOn }); });
+
   function send(msg) { if (window.sendToPlugin) window.sendToPlugin(msg); }
 
   window.onPluginMessage = function (msg) {
@@ -250,6 +257,7 @@
       setPlayhead(msg.playhead);
       setVoices(msg.voices);
       setPlaying(msg.playing);
+      if ("seq" in msg) setSeq(msg.seq);
     }
   };
 

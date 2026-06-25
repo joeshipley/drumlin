@@ -6,22 +6,35 @@
 //! audio path has no allocation or virtual dispatch.
 
 pub mod clap;
+pub mod cowbell;
 pub mod hat;
 pub mod kick;
+pub mod rim;
 pub mod snare;
+pub mod tom;
+pub mod zap;
 
 pub use clap::ClapVoice;
+pub use cowbell::CowbellVoice;
 pub use hat::HatVoice;
 pub use kick::KickVoice;
+pub use rim::RimVoice;
 pub use snare::SnareVoice;
+pub use tom::TomVoice;
+pub use zap::ZapVoice;
 
-/// One drum track's voice. `Silent` is the placeholder for the 7 tracks not yet
-/// implemented in M2 (toms/perc/cymbal/FM/sample arrive at M4).
+/// One drum track's voice. `Kick`/`Hat` cover several tracks via constructor
+/// variants (sub kick, ride cymbal). `Silent` is the placeholder for any track
+/// not yet voiced.
 pub enum Voice {
     Kick(KickVoice),
     Snare(SnareVoice),
     Hat(HatVoice),
     Clap(ClapVoice),
+    Tom(TomVoice),
+    Rim(RimVoice),
+    Cowbell(CowbellVoice),
+    Zap(ZapVoice),
     Silent,
 }
 
@@ -32,6 +45,10 @@ impl Voice {
             Voice::Snare(v) => v.set_sample_rate(sr),
             Voice::Hat(v) => v.set_sample_rate(sr),
             Voice::Clap(v) => v.set_sample_rate(sr),
+            Voice::Tom(v) => v.set_sample_rate(sr),
+            Voice::Rim(v) => v.set_sample_rate(sr),
+            Voice::Cowbell(v) => v.set_sample_rate(sr),
+            Voice::Zap(v) => v.set_sample_rate(sr),
             Voice::Silent => {}
         }
     }
@@ -42,6 +59,10 @@ impl Voice {
             Voice::Snare(v) => v.trigger(velocity, accent),
             Voice::Hat(v) => v.trigger(velocity, accent),
             Voice::Clap(v) => v.trigger(velocity, accent),
+            Voice::Tom(v) => v.trigger(velocity, accent),
+            Voice::Rim(v) => v.trigger(velocity, accent),
+            Voice::Cowbell(v) => v.trigger(velocity, accent),
+            Voice::Zap(v) => v.trigger(velocity, accent),
             Voice::Silent => {}
         }
     }
@@ -52,6 +73,10 @@ impl Voice {
             Voice::Snare(v) => v.render(),
             Voice::Hat(v) => v.render(),
             Voice::Clap(v) => v.render(),
+            Voice::Tom(v) => v.render(),
+            Voice::Rim(v) => v.render(),
+            Voice::Cowbell(v) => v.render(),
+            Voice::Zap(v) => v.render(),
             Voice::Silent => (0.0, 0.0),
         }
     }
@@ -62,6 +87,10 @@ impl Voice {
             Voice::Snare(v) => v.choke(),
             Voice::Hat(v) => v.choke(),
             Voice::Clap(v) => v.choke(),
+            Voice::Tom(v) => v.choke(),
+            Voice::Rim(v) => v.choke(),
+            Voice::Cowbell(v) => v.choke(),
+            Voice::Zap(v) => v.choke(),
             Voice::Silent => {}
         }
     }
@@ -72,6 +101,10 @@ impl Voice {
             Voice::Snare(v) => v.is_active(),
             Voice::Hat(v) => v.is_active(),
             Voice::Clap(v) => v.is_active(),
+            Voice::Tom(v) => v.is_active(),
+            Voice::Rim(v) => v.is_active(),
+            Voice::Cowbell(v) => v.is_active(),
+            Voice::Zap(v) => v.is_active(),
             Voice::Silent => false,
         }
     }
@@ -82,6 +115,10 @@ impl Voice {
             Voice::Snare(v) => v.reset(),
             Voice::Hat(v) => v.reset(),
             Voice::Clap(v) => v.reset(),
+            Voice::Tom(v) => v.reset(),
+            Voice::Rim(v) => v.reset(),
+            Voice::Cowbell(v) => v.reset(),
+            Voice::Zap(v) => v.reset(),
             Voice::Silent => {}
         }
     }

@@ -74,10 +74,17 @@ fn render_pattern_oneshot() -> Vec<u8> {
 
 const GOLDENS: &[(&str, fn() -> Vec<u8>)] = &[
     ("kick.bin", || render_voice_oneshot(0)),
+    ("sub.bin", || render_voice_oneshot(1)),
     ("snare.bin", || render_voice_oneshot(2)),
     ("clap.bin", || render_voice_oneshot(3)),
+    ("rim.bin", || render_voice_oneshot(4)),
     ("chat.bin", || render_voice_oneshot(5)),
     ("ohat.bin", || render_voice_oneshot(6)),
+    ("ride.bin", || render_voice_oneshot(7)),
+    ("tomlo.bin", || render_voice_oneshot(8)),
+    ("tomhi.bin", || render_voice_oneshot(9)),
+    ("cowbell.bin", || render_voice_oneshot(10)),
+    ("zap.bin", || render_voice_oneshot(11)),
     ("pattern_a1.bin", render_pattern_oneshot),
 ];
 
@@ -130,6 +137,10 @@ fn kick_matches_golden() {
     assert_matches_golden("kick.bin", &render_voice_oneshot(0));
 }
 #[test]
+fn sub_matches_golden() {
+    assert_matches_golden("sub.bin", &render_voice_oneshot(1));
+}
+#[test]
 fn snare_matches_golden() {
     assert_matches_golden("snare.bin", &render_voice_oneshot(2));
 }
@@ -138,12 +149,36 @@ fn clap_matches_golden() {
     assert_matches_golden("clap.bin", &render_voice_oneshot(3));
 }
 #[test]
+fn rim_matches_golden() {
+    assert_matches_golden("rim.bin", &render_voice_oneshot(4));
+}
+#[test]
 fn closed_hat_matches_golden() {
     assert_matches_golden("chat.bin", &render_voice_oneshot(5));
 }
 #[test]
 fn open_hat_matches_golden() {
     assert_matches_golden("ohat.bin", &render_voice_oneshot(6));
+}
+#[test]
+fn ride_matches_golden() {
+    assert_matches_golden("ride.bin", &render_voice_oneshot(7));
+}
+#[test]
+fn tom_lo_matches_golden() {
+    assert_matches_golden("tomlo.bin", &render_voice_oneshot(8));
+}
+#[test]
+fn tom_hi_matches_golden() {
+    assert_matches_golden("tomhi.bin", &render_voice_oneshot(9));
+}
+#[test]
+fn cowbell_matches_golden() {
+    assert_matches_golden("cowbell.bin", &render_voice_oneshot(10));
+}
+#[test]
+fn zap_matches_golden() {
+    assert_matches_golden("zap.bin", &render_voice_oneshot(11));
 }
 #[test]
 fn default_pattern_matches_golden() {

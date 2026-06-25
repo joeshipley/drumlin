@@ -16,6 +16,7 @@ pub struct KickVoice {
     base_hz: f32,
     pitch_amount_st: f32,
     click_level: f32,
+    amp_decay_ms: f32,
     accent_amt: f32,
     gain: f32,
 }
@@ -37,6 +38,7 @@ impl KickVoice {
             base_hz: 52.0,
             pitch_amount_st: 30.0,
             click_level: 0.35,
+            amp_decay_ms: 260.0,
             accent_amt: 0.5,
             gain: 1.0,
         };
@@ -44,8 +46,20 @@ impl KickVoice {
         v
     }
 
+    /// A deeper, rounder sub-kick for track 2 (KICK2/SUB): lower, longer, almost
+    /// no click.
+    pub fn sub(sr: f32) -> Self {
+        let mut k = Self::neutral(sr);
+        k.base_hz = 40.0;
+        k.pitch_amount_st = 16.0;
+        k.click_level = 0.08;
+        k.amp_decay_ms = 420.0;
+        k.apply_envs();
+        k
+    }
+
     fn apply_envs(&mut self) {
-        self.amp.set_params(0.5, 3.0, 260.0); // punchy, not boomy
+        self.amp.set_params(0.5, 3.0, self.amp_decay_ms);
         self.pitch.set_params(0.0, 0.0, 45.0); // fast 909 pitch drop
         self.click_env.set_params(0.0, 0.0, 2.5); // 2.5 ms knock
     }
@@ -94,6 +108,9 @@ impl KickVoice {
         self.pitch.reset();
         self.click_env.reset();
         self.osc.reset();
+        // Drive exposes no reset(), but set_sample_rate clears its recursive
+        // state (tone_lp / prev_in / sample-hold) while keeping the params.
+        self.drive.set_sample_rate(self.sr);
     }
 }
 

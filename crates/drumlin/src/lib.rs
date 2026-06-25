@@ -50,6 +50,7 @@ enum Action {
     Note { on: bool, note: u8 },
     Step { track: usize, step: usize, on: bool },
     Transport { play: bool },
+    SeqEnable { on: bool },
 }
 
 #[derive(Params)]
@@ -106,6 +107,11 @@ pub struct Drumlin {
     /// Effective playing state (host transport OR internal clock), published so
     /// the GUI PLAY indicator reflects host-driven playback too.
     effective_playing: Arc<AtomicBool>,
+    /// Master enable for the internal step sequencer. On = groovebox (the grid
+    /// runs, locked to the host transport / standalone PLAY). Off = Drumlin is
+    /// purely MIDI/pad-driven and the grid stays silent, so a host MIDI region
+    /// drives it cleanly without the internal pattern doubling it.
+    seq_enabled: Arc<AtomicBool>,
 
     /// KIT/preset/pattern panic-reset flag, drained at block start.
     fx_reset_pending: Arc<AtomicBool>,
@@ -130,6 +136,7 @@ impl Default for Drumlin {
             playhead: Arc::new(AtomicI32::new(-1)),
             voice_active: Arc::new(AtomicU16::new(0)),
             effective_playing: Arc::new(AtomicBool::new(false)),
+            seq_enabled: Arc::new(AtomicBool::new(true)),
             fx_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -177,7 +184,9 @@ impl Plugin for Drumlin {
         let playhead = self.playhead.clone();
         let voice_active = self.voice_active.clone();
         let effective_playing = self.effective_playing.clone();
-        // Pack (playing<<20 | voices<<8 | playhead+1) to suppress unchanged sends.
+        let seq_enabled = self.seq_enabled.clone();
+        // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
+        // unchanged status sends.
         let last_status = Arc::new(AtomicU32::new(u32::MAX));
 
         let editor = WebViewEditor::new(
@@ -217,15 +226,20 @@ impl Plugin for Drumlin {
                     Action::Transport { play } => {
                         internal_play.store(play, Ordering::Relaxed);
                     }
+                    Action::SeqEnable { on } => {
+                        seq_enabled.store(on, Ordering::Relaxed);
+                    }
                 }
             }
 
-            // Publish playhead + voice LEDs, but only when something changed.
+            // Publish playhead + voice LEDs + transport state, only on change.
             let ph = playhead.load(Ordering::Relaxed);
             let va = voice_active.load(Ordering::Relaxed);
             // Effective state (host OR internal) so the indicator tracks the host.
             let playing = effective_playing.load(Ordering::Relaxed);
-            let packed = ((playing as u32) << 20)
+            let seq_on = seq_enabled.load(Ordering::Relaxed);
+            let packed = ((seq_on as u32) << 21)
+                | ((playing as u32) << 20)
                 | (((va as u32) & 0xFFF) << 8)
                 | (((ph + 1) as u32) & 0xFF);
             if last_status.swap(packed, Ordering::Relaxed) != packed {
@@ -234,6 +248,7 @@ impl Plugin for Drumlin {
                     "playhead": ph,
                     "voices": va,
                     "playing": playing,
+                    "seq": seq_on,
                 }));
             }
         });
@@ -296,6 +311,7 @@ impl Plugin for Drumlin {
         let block_len = buffer.samples();
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
+        let seq_on = self.seq_enabled.load(Ordering::Relaxed);
 
         // Reset the preview playhead on a fresh standalone PLAY.
         if internal_playing && !self.was_internal_playing && !host_playing {
@@ -304,16 +320,18 @@ impl Plugin for Drumlin {
         }
         self.was_internal_playing = internal_playing;
 
-        let (playing, pos_qn) = if host_playing {
-            (true, transport.pos_beats().unwrap_or(self.internal_pos_qn))
-        } else if internal_playing {
-            (true, self.internal_pos_qn)
+        // The grid runs only when SEQ is enabled, and then follows the host
+        // transport (or the standalone PLAY clock). MIDI/pad triggering below is
+        // independent of this, so SEQ-off gives clean MIDI-region control.
+        let run = seq_on && (host_playing || internal_playing);
+        let pos_qn = if host_playing {
+            transport.pos_beats().unwrap_or(self.internal_pos_qn)
         } else {
-            (false, self.internal_pos_qn)
+            self.internal_pos_qn
         };
 
-        self.seq.set_playing(playing);
-        self.effective_playing.store(playing, Ordering::Relaxed);
+        self.seq.set_playing(run);
+        self.effective_playing.store(run, Ordering::Relaxed);
         self.seq.process_block(pos_qn, tempo, sr, block_len);
 
         // Advance the internal preview clock to the block END (where the
