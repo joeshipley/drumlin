@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/dsp_core", "crates/percussion_core", "crates/drumlin", "xtask"]
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Joe Shipley"]
+license = "MIT"
+# Declaring our MSRV lets Cargo's resolver pick dependency versions that build
+# on this toolchain (Homebrew rustc 1.87) instead of the newest ones. Matches
+# Esker so the shared DSP stays bit-compatible across the family.
+rust-version = "1.87"
+
+# Release builds: optimize hard. Audio code lives or dies on this.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

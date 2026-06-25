@@ -1,0 +1,12 @@
+[package]
+name = "dsp_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Pure DSP. Intentionally NO dependencies so it builds and tests in milliseconds.
+# These modules are copied verbatim from Esker's `synth_core` (the shared family
+# sound) and are kept byte-for-byte identical so a fix can be upstreamed/merged
+# back into Esker. See docs/drumlin-plan.md §0.
+[dependencies]

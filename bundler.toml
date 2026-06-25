@@ -1,0 +1,5 @@
+# Renames the bundled plugin artifacts so `cargo xtask bundle drumlin` produces
+# Drumlin.clap (the user-facing product name) rather than drumlin.*.
+# The cargo package/crate name stays `drumlin` internally (lowercase).
+[drumlin]
+name = "Drumlin"

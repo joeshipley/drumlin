@@ -1,0 +1,11 @@
+[package]
+name = "percussion_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Drum voices + sequencer. Depends only on the shared DSP primitives; no plugin
+# or host types, so it tests in milliseconds like dsp_core.
+[dependencies]
+dsp_core = { path = "../dsp_core" }

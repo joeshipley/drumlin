@@ -1,0 +1,51 @@
+[package]
+name = "drumlin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# `cdylib` = the plugin the DAW loads. `lib` = lets the standalone bin link this
+# crate so it can run Drumlin as its own CoreAudio app, no DAW required.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "drumlin"
+path = "src/main.rs"
+
+[dependencies]
+# nih-plug is distributed via git (not crates.io). Pinned (via Cargo.lock) to the
+# same rev Esker uses so the family stays bit-compatible.
+# `default-features = false` DROPS nih-plug's default `vst3` feature, which pulls
+# in the GPL-3.0 `vst3-sys` bindings — keeping Drumlin's whole dependency tree
+# permissive. Drumlin ships as CLAP + AU (both royalty-free), not VST3.
+# - `assert_process_allocs`: panics in debug builds if anything allocates on the
+#   audio thread — a real-time-safety guardrail.
+# - `standalone`: enables the `nih_export_standalone()` entry point (CoreAudio +
+#   MIDI via CPAL/midir).
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["assert_process_allocs", "standalone"] }
+
+# The shared family DSP (copied from Esker). Zero external deps.
+dsp_core = { path = "../dsp_core" }
+percussion_core = { path = "../percussion_core" }
+
+# Custom webview-based editor. Vendored copy of the same fork Esker uses, patched
+# to drop nih-plug's vst3 feature. Declares `nih_plug` from robbert-vdh's repo
+# with NO rev, so Cargo's single-source-per-git-URL unification compiles it
+# against the SAME nih_plug rev this workspace pins.
+nih_plug_webview = { path = "../../vendor/nih-plug-webview" }
+
+# Inbound JS->Rust action enum (#[derive(Deserialize)]) + outbound JSON via json!().
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Lock-free SPSC ring buffer for the on-screen pad-bank note channel: the editor
+# event-loop thread is the single producer, the audio thread the single consumer
+# (drains once per block). `push`/`pop` never allocate and never block.
+rtrb = "0.2"
+
+# Cross-platform per-user config dir for DISK PRESETS / KITS. macOS resolves to
+# `~/Library/Application Support/Drumlin/`. All preset file IO happens on the
+# editor thread, never the audio thread.
+directories = "5"

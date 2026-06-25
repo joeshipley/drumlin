@@ -1,0 +1,402 @@
+//! Drumlin — a characterful analog drum-machine plugin; the rhythm-section
+//! sibling to Esker.
+//!
+//! M2: a real-time-safe CLAP/AU instrument that grooves. It drives a
+//! `percussion_core` step sequencer off the host transport (or an internal
+//! preview clock in standalone), triggers the Kick/Snare/Clap/Hat voices,
+//! accepts host MIDI (GM note map) and local on-screen pad audition, and shows
+//! a live, editable step grid in the PRISM webview. The per-voice tail, bus FX,
+//! mod matrix and KITS arrive at M3+. See `docs/drumlin-plan.md`.
+
+use nih_plug::prelude::*;
+use nih_plug_webview::{HTMLSource, WebViewEditor};
+use rtrb::{Consumer, Producer, RingBuffer};
+use serde::Deserialize;
+use serde_json::json;
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+use percussion_core::{track_for_note, DrumKit, Pattern, Sequencer, MAX_TRACKS};
+
+const EDITOR_WIDTH: u32 = 1100;
+const EDITOR_HEIGHT: u32 = 800;
+
+/// On-screen pad-bank note ring capacity (editor producer -> audio consumer).
+const KBD_QUEUE_CAP: usize = 256;
+/// Grid step-edit ring capacity (editor producer -> audio consumer).
+const EDIT_QUEUE_CAP: usize = 512;
+
+/// Default velocity for on-screen pad hits.
+const PAD_VELOCITY: f32 = 0.9;
+
+// ---- edit-ring packing: a single u32 carries a step toggle -----------------
+// bits: [10..7]=track(0..15), [7..1]=step(0..63), [0]=on
+fn pack_step(track: usize, step: usize, on: bool) -> u32 {
+    (((track as u32) & 0xF) << 7) | (((step as u32) & 0x3F) << 1) | (on as u32)
+}
+fn unpack_step(v: u32) -> (usize, usize, bool) {
+    let on = v & 1 != 0;
+    let step = ((v >> 1) & 0x3F) as usize;
+    let track = ((v >> 7) & 0xF) as usize;
+    (track, step, on)
+}
+
+/// JS -> Rust messages from the webview.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum Action {
+    Init,
+    Note { on: bool, note: u8 },
+    Step { track: usize, step: usize, on: bool },
+    Transport { play: bool },
+}
+
+#[derive(Params)]
+struct DrumlinParams {
+    #[id = "master_gain"]
+    gain: FloatParam,
+}
+
+impl Default for DrumlinParams {
+    fn default() -> Self {
+        Self {
+            gain: FloatParam::new(
+                "Master",
+                util::db_to_gain(-3.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-60.0),
+                    max: util::db_to_gain(6.0),
+                    factor: FloatRange::gain_skew_factor(-60.0, 6.0),
+                },
+            )
+            .with_unit(" dB")
+            .with_smoother(SmoothingStyle::Logarithmic(20.0))
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+        }
+    }
+}
+
+pub struct Drumlin {
+    params: Arc<DrumlinParams>,
+    sample_rate: f32,
+
+    kit: DrumKit,
+    seq: Sequencer,
+    /// Internal preview transport position (quarter notes); used in standalone
+    /// or when the host is stopped but the GUI PLAY is engaged.
+    internal_pos_qn: f64,
+    was_internal_playing: bool,
+
+    /// On-screen pad ring (editor -> audio). Local audition only; never written
+    /// to the host's recorded MIDI stream (the Esker lesson).
+    kbd_tx: Option<Producer<u16>>,
+    kbd_rx: Consumer<u16>,
+    /// Grid step-edit ring (editor -> audio).
+    edit_tx: Option<Producer<u32>>,
+    edit_rx: Consumer<u32>,
+
+    /// GUI PLAY toggle for the internal preview clock.
+    internal_play: Arc<AtomicBool>,
+    /// Current sequencer step (-1 when stopped), published for the moving column.
+    playhead: Arc<AtomicI32>,
+    /// Per-track "sounding" bitmap (bit t = track t active), for trigger LEDs.
+    voice_active: Arc<AtomicU16>,
+    /// Effective playing state (host transport OR internal clock), published so
+    /// the GUI PLAY indicator reflects host-driven playback too.
+    effective_playing: Arc<AtomicBool>,
+
+    /// KIT/preset/pattern panic-reset flag, drained at block start.
+    fx_reset_pending: Arc<AtomicBool>,
+}
+
+impl Default for Drumlin {
+    fn default() -> Self {
+        let (kbd_tx, kbd_rx) = RingBuffer::<u16>::new(KBD_QUEUE_CAP);
+        let (edit_tx, edit_rx) = RingBuffer::<u32>::new(EDIT_QUEUE_CAP);
+        Self {
+            params: Arc::new(DrumlinParams::default()),
+            sample_rate: 48_000.0,
+            kit: DrumKit::neutral(48_000.0),
+            seq: Sequencer::new(),
+            internal_pos_qn: 0.0,
+            was_internal_playing: false,
+            kbd_tx: Some(kbd_tx),
+            kbd_rx,
+            edit_tx: Some(edit_tx),
+            edit_rx,
+            internal_play: Arc::new(AtomicBool::new(false)),
+            playhead: Arc::new(AtomicI32::new(-1)),
+            voice_active: Arc::new(AtomicU16::new(0)),
+            effective_playing: Arc::new(AtomicBool::new(false)),
+            fx_reset_pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+/// JSON of the initial Neutral demo grid for the GUI to render on init.
+fn grid_json() -> serde_json::Value {
+    let p = Pattern::neutral_demo();
+    let len = p.length as usize;
+    let cells: Vec<Vec<bool>> = (0..MAX_TRACKS)
+        .map(|t| (0..len).map(|s| p.tracks[t].steps[s].on).collect())
+        .collect();
+    json!({ "type": "grid", "length": p.length, "tracks": MAX_TRACKS, "cells": cells })
+}
+
+impl Plugin for Drumlin {
+    const NAME: &'static str = "Drumlin";
+    const VENDOR: &'static str = "Joe Shipley";
+    const URL: &'static str = "";
+    const EMAIL: &'static str = "";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: None,
+        main_output_channels: NonZeroU32::new(2),
+        aux_input_ports: &[],
+        aux_output_ports: &[],
+        names: PortNames::const_default(),
+    }];
+
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
+    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+    type SysExMessage = ();
+    type BackgroundTask = ();
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let kbd_tx = Mutex::new(self.kbd_tx.take());
+        let edit_tx = Mutex::new(self.edit_tx.take());
+        let internal_play = self.internal_play.clone();
+        let playhead = self.playhead.clone();
+        let voice_active = self.voice_active.clone();
+        let effective_playing = self.effective_playing.clone();
+        // Pack (playing<<20 | voices<<8 | playhead+1) to suppress unchanged sends.
+        let last_status = Arc::new(AtomicU32::new(u32::MAX));
+
+        let editor = WebViewEditor::new(
+            HTMLSource::String(include_str!("gui/index.html")),
+            (EDITOR_WIDTH, EDITOR_HEIGHT),
+        )
+        .with_background_color((0x0E, 0x0F, 0x12, 0xFF))
+        .with_developer_mode(cfg!(debug_assertions))
+        .with_keyboard_handler(|event| {
+            event.state == nih_plug_webview::KeyState::Down
+                && event.key == nih_plug_webview::Key::Escape
+        })
+        .with_event_loop(move |ctx, _setter, _window| {
+            while let Ok(value) = ctx.next_event() {
+                let Ok(action) = serde_json::from_value::<Action>(value) else {
+                    continue;
+                };
+                match action {
+                    Action::Init => {
+                        ctx.send_json(grid_json());
+                    }
+                    Action::Note { on, note } => {
+                        if let Ok(mut tx) = kbd_tx.lock() {
+                            if let Some(tx) = tx.as_mut() {
+                                let ev = (note as u16) | (if on { 0x100 } else { 0x000 });
+                                let _ = tx.push(ev);
+                            }
+                        }
+                    }
+                    Action::Step { track, step, on } => {
+                        if let Ok(mut tx) = edit_tx.lock() {
+                            if let Some(tx) = tx.as_mut() {
+                                let _ = tx.push(pack_step(track, step, on));
+                            }
+                        }
+                    }
+                    Action::Transport { play } => {
+                        internal_play.store(play, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            // Publish playhead + voice LEDs, but only when something changed.
+            let ph = playhead.load(Ordering::Relaxed);
+            let va = voice_active.load(Ordering::Relaxed);
+            // Effective state (host OR internal) so the indicator tracks the host.
+            let playing = effective_playing.load(Ordering::Relaxed);
+            let packed = ((playing as u32) << 20)
+                | (((va as u32) & 0xFFF) << 8)
+                | (((ph + 1) as u32) & 0xFF);
+            if last_status.swap(packed, Ordering::Relaxed) != packed {
+                ctx.send_json(json!({
+                    "type": "status",
+                    "playhead": ph,
+                    "voices": va,
+                    "playing": playing,
+                }));
+            }
+        });
+
+        Some(Box::new(editor))
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.sample_rate = buffer_config.sample_rate;
+        self.kit.set_sample_rate(buffer_config.sample_rate);
+        true
+    }
+
+    fn reset(&mut self) {
+        self.kit.reset();
+        self.seq.reset_playhead();
+        self.internal_pos_qn = 0.0;
+        self.was_internal_playing = false;
+    }
+
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        // Once per block: panic-reset on a pending KIT/pattern jump.
+        if self.fx_reset_pending.swap(false, Ordering::Relaxed) {
+            self.kit.reset();
+        }
+
+        // Once per block: apply queued grid edits from the GUI.
+        while let Ok(packed) = self.edit_rx.pop() {
+            let (track, step, on) = unpack_step(packed);
+            self.seq.set_step(track, step, on);
+        }
+
+        // Once per block, at sample 0: local pad audition (drums are one-shots,
+        // so note-off is ignored).
+        while let Ok(ev) = self.kbd_rx.pop() {
+            let note = (ev & 0x7F) as u8;
+            let on = ev & 0x100 != 0;
+            if on {
+                if let Some(t) = track_for_note(note) {
+                    self.kit.trigger(t, PAD_VELOCITY, false);
+                }
+            }
+        }
+
+        // Resolve the transport: host wins; otherwise the GUI PLAY drives an
+        // internal preview clock.
+        let transport = context.transport();
+        let tempo = transport.tempo.unwrap_or(120.0).max(1.0);
+        let sr = self.sample_rate as f64;
+        let block_len = buffer.samples();
+        let host_playing = transport.playing;
+        let internal_playing = self.internal_play.load(Ordering::Relaxed);
+
+        // Reset the preview playhead on a fresh standalone PLAY.
+        if internal_playing && !self.was_internal_playing && !host_playing {
+            self.internal_pos_qn = 0.0;
+            self.seq.reset_playhead();
+        }
+        self.was_internal_playing = internal_playing;
+
+        let (playing, pos_qn) = if host_playing {
+            (true, transport.pos_beats().unwrap_or(self.internal_pos_qn))
+        } else if internal_playing {
+            (true, self.internal_pos_qn)
+        } else {
+            (false, self.internal_pos_qn)
+        };
+
+        self.seq.set_playing(playing);
+        self.effective_playing.store(playing, Ordering::Relaxed);
+        self.seq.process_block(pos_qn, tempo, sr, block_len);
+
+        // Advance the internal preview clock to the block END (where the
+        // sequencer playhead now is), so a later host-stop -> internal handoff
+        // continues seamlessly instead of rewinding to this block's start.
+        let block_advance = (tempo / 60.0) * (block_len as f64 / sr);
+        if host_playing {
+            self.internal_pos_qn = pos_qn + block_advance;
+        } else if internal_playing {
+            self.internal_pos_qn += block_advance;
+        }
+
+        // Per-sample render: interleave host MIDI, sequencer triggers, and the
+        // kit, scheduling each at its exact sample offset.
+        let mut ti = 0usize;
+        let pending_len = self.seq.pending().len();
+        let mut next_midi = context.next_event();
+
+        for (i, channel_samples) in buffer.iter_samples().enumerate() {
+            // Host MIDI notes at this sample (GM note map -> track).
+            while let Some(event) = next_midi {
+                if event.timing() as usize > i {
+                    break;
+                }
+                if let NoteEvent::NoteOn { note, velocity, .. } = event {
+                    if let Some(t) = track_for_note(note) {
+                        self.kit.trigger(t, velocity, false);
+                    }
+                }
+                next_midi = context.next_event();
+            }
+
+            // Sequencer triggers scheduled at or before this sample (offsets are
+            // emitted in ascending order; `> i` is robust if one ever lands early).
+            while ti < pending_len {
+                let trg = self.seq.pending()[ti];
+                if trg.offset as usize > i {
+                    break;
+                }
+                self.kit.trigger(trg.track as usize, trg.velocity, trg.accent);
+                ti += 1;
+            }
+
+            let (l, r) = self.kit.render();
+            let g = self.params.gain.smoothed.next();
+            for (ch, sample) in channel_samples.into_iter().enumerate() {
+                *sample = if ch == 0 { l * g } else { r * g };
+            }
+        }
+
+        // Every scheduled trigger must have fired within the block (offsets are
+        // always < block_len); a leftover would mean a stranded hit.
+        debug_assert_eq!(ti, pending_len, "stranded sequencer triggers");
+
+        // Publish playhead + per-track activity for the GUI.
+        self.playhead.store(
+            self.seq.current_step().map(|s| s as i32).unwrap_or(-1),
+            Ordering::Relaxed,
+        );
+        let mut mask = 0u16;
+        for t in 0..MAX_TRACKS {
+            if self.kit.track_active(t) {
+                mask |= 1 << t;
+            }
+        }
+        self.voice_active.store(mask, Ordering::Relaxed);
+
+        ProcessStatus::KeepAlive
+    }
+}
+
+impl ClapPlugin for Drumlin {
+    const CLAP_ID: &'static str = "com.joeshipley.drumlin";
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("Drumlin — a characterful analog drum machine");
+    const CLAP_MANUAL_URL: Option<&'static str> = None;
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::Instrument,
+        ClapFeature::Drum,
+        ClapFeature::Stereo,
+    ];
+}
+
+// VST3 intentionally NOT exported (GPL vst3-sys). CLAP + AU only. See plan §7.1.
+nih_export_clap!(Drumlin);

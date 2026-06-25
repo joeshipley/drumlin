@@ -1,0 +1,8 @@
+# Lets you run `cargo xtask bundle drumlin --release` to produce the .clap bundle.
+[alias]
+xtask = "run --package xtask --release --"
+
+# When a dependency's newest version needs a newer rustc than ours, fall back to
+# the latest version that DOES build on our toolchain instead of erroring.
+[resolver]
+incompatible-rust-versions = "fallback"
