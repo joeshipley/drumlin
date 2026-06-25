@@ -80,6 +80,12 @@ struct DrumlinParams {
     /// Lo-fi bus drive.
     #[id = "bus_drive"]
     bus_drive: FloatParam,
+    /// Plate reverb send (the "space").
+    #[id = "reverb"]
+    reverb: FloatParam,
+    /// Tape/stereo delay mix.
+    #[id = "delay"]
+    delay: FloatParam,
 }
 
 impl Default for DrumlinParams {
@@ -103,6 +109,14 @@ impl Default for DrumlinParams {
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
             bus_drive: FloatParam::new("Bus Drive", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            reverb: FloatParam::new("Reverb", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            delay: FloatParam::new("Delay", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
@@ -284,6 +298,8 @@ impl Plugin for Drumlin {
                     match $id {
                         1u8 => &params.pump,
                         2u8 => &params.bus_drive,
+                        3u8 => &params.reverb,
+                        4u8 => &params.delay,
                         _ => &params.gain,
                     }
                 }};
@@ -460,6 +476,8 @@ impl Plugin for Drumlin {
         self.kit.set_bus_tempo(tempo as f32);
         self.kit.set_pump(self.params.pump.value());
         self.kit.set_bus_drive(self.params.bus_drive.value());
+        self.kit.set_bus_reverb(self.params.reverb.value());
+        self.kit.set_bus_delay(self.params.delay.value());
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);

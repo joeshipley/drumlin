@@ -89,6 +89,11 @@
   .pads { display: grid; grid-template-columns: repeat(6, 42px); grid-template-rows: repeat(2, 26px); gap: 4px; }
   .pad { border-radius: 5px; background: var(--raise); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 7px; letter-spacing: 0.4px; color: var(--dim); cursor: pointer; text-align: center; }
   .pad.hit { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .busfx { display: flex; flex-direction: column; gap: 2px; padding: 0 12px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  .busfx-h { font-family: var(--mono); font-size: 7.5px; letter-spacing: 1.5px; color: var(--dim-3); margin-bottom: 2px; }
+  .busfx-row { display: flex; align-items: center; gap: 6px; }
+  .busfx-row label { font-family: var(--mono); font-size: 8px; letter-spacing: 0.5px; color: var(--dim); width: 36px; }
+  .busfx-row input[type=range] { width: 70px; }
   .note { font-family: var(--mono); font-size: 9px; letter-spacing: 0.4px; color: var(--dim-3); line-height: 1.7; }
   .note b { color: var(--dim); font-weight: 600; }
 </style>
@@ -106,7 +111,6 @@
       <div class="spacer"></div>
       <div class="pats" id="pats"></div>
       <div class="chip pump" title="Sidechain pump — the French-house duck (beat-synced)">PUMP <input type="range" id="pump" min="0" max="1000" value="0" style="width:56px"><span class="duck"><span class="duckfill" id="duckfill"></span></span></div>
-      <div class="chip slid">DRV <input type="range" id="drive" min="0" max="1000" value="0" style="width:44px"></div>
     </div>
 
     <div class="band">
@@ -124,6 +128,12 @@
 
     <div class="footer">
       <div class="pads" id="pads"></div>
+      <div class="busfx">
+        <div class="busfx-h">BUS FX</div>
+        <div class="busfx-row"><label>DRIVE</label><input type="range" id="drive" min="0" max="1000" value="0"></div>
+        <div class="busfx-row"><label>SPACE</label><input type="range" id="reverb" min="0" max="1000" value="0"></div>
+        <div class="busfx-row"><label>DELAY</label><input type="range" id="delay" min="0" max="1000" value="0"></div>
+      </div>
       <div class="note">
         <div><b>Click</b> a cell to toggle &amp; select it · edit it in the panel on the right · click a <b>lane name</b> for lane tools.</div>
         <div>Set probability, ratchets, conditions &amp; <b>p-locks</b> per step. Hold FILL for fill steps.</div>
@@ -353,6 +363,8 @@
   }
   paramSlider(1, document.getElementById("pump"));
   paramSlider(2, document.getElementById("drive"));
+  paramSlider(3, document.getElementById("reverb"));
+  paramSlider(4, document.getElementById("delay"));
   const duckfill = document.getElementById("duckfill");
 
   // ---- pads ----

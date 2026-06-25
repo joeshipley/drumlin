@@ -225,6 +225,16 @@ impl DrumKit {
         self.bus.set_drive(amount);
     }
 
+    /// Plate reverb send, 0..1.
+    pub fn set_bus_reverb(&mut self, amount: f32) {
+        self.bus.set_reverb(amount);
+    }
+
+    /// Tape/stereo delay mix, 0..1.
+    pub fn set_bus_delay(&mut self, amount: f32) {
+        self.bus.set_delay(amount);
+    }
+
     /// Live pump duck gain (1.0 = open) for the GUI pump meter.
     pub fn pump_envelope(&self) -> f32 {
         self.bus.pump_envelope()

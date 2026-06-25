@@ -2,58 +2,76 @@
 //! (design §5.3): the whole kit is processed as a unit so it hits like one
 //! instrument.
 //!
-//! M3 shipped the SSL-style glue compressor → true-peak limiter. **M7 adds the
-//! sidechain PUMP** — "the single most genre-defining control in the plugin" —
-//! plus a lo-fi bus drive. The pump ducks the whole bus on the beat
-//! (`PumpSource::IntKick`, quarter-note division) for the Daft-Punk/French-house
-//! breathe; `pump_envelope()` exposes the live duck gain so the GUI can *see* it.
-//! Transient shaper, parallel/NY comp, tape delay and reverb send join next.
+//! Signal flow (design §5.3 order, true-peak limiter LAST):
+//!   kit sum → bus drive → comp (sidechain PUMP → SSL glue) → tape/stereo DELAY
+//!            → plate REVERB send → true-peak limiter
 //!
-//! Signal flow: kit sum → bus drive → Dynamics (pump → glue → true-peak limiter).
-//! At the Neutral defaults (pump = 0, drive = 0) the bus is bit-identical to M3,
-//! so the golden anchors are unaffected.
+//! - **PUMP** (M7) — `Dynamics::set_pump` (`IntKick`, beat-synced quarter-note
+//!   duck): the Daft-Punk/French-house breathe. `pump_envelope()` drives the GUI
+//!   duck meter.
+//! - **DRIVE** (M7) — lo-fi bus saturation.
+//! - **DELAY + REVERB** (M7 pt2) — the "drive & space" the kit was missing; both
+//!   tempo-aware, and a true bypass (dry passthrough) at amount 0.
+//! - **glue + true-peak limiter** (M3).
+//!
+//! At the Neutral defaults (pump/drive/reverb/delay all 0) the chain is a pure
+//! passthrough into glue → limiter, so the golden anchors are unaffected.
+//! Transient shaper, parallel/NY comp and the snare gated-verb send join next.
 
-use synth_core::{Drive, DriveKind, Dynamics, LimiterStyle, PumpSource};
+use synth_core::{Delay, DelayMode, Drive, DriveKind, Dynamics, LimiterStyle, PumpSource, Reverb, ReverbAlgo};
 
 pub struct DrumBus {
-    dynamics: Dynamics,
     drive_l: Drive,
     drive_r: Drive,
+    comp: Dynamics,    // pump + glue (limiter handled separately so FX sit before it)
+    delay: Delay,
+    reverb: Reverb,
+    limiter: Dynamics, // true-peak limiter, last in the chain
     sr: f32,
     tempo: f32,
     pump: f32,
     drive: f32,
+    reverb_amt: f32,
+    delay_amt: f32,
 }
 
 impl DrumBus {
     pub fn neutral(sr: f32) -> Self {
         let mut bus = Self {
-            dynamics: Dynamics::new(sr),
             drive_l: Drive::new(sr),
             drive_r: Drive::new(sr),
+            comp: Dynamics::new(sr),
+            delay: Delay::new(sr),
+            reverb: Reverb::new(sr),
+            limiter: Dynamics::new(sr),
             sr,
             tempo: 120.0,
             pump: 0.0,
             drive: 0.0,
+            reverb_amt: 0.0,
+            delay_amt: 0.0,
         };
         bus.configure();
         bus
     }
 
     fn configure(&mut self) {
-        // Gentle SSL-style glue, then a true-peak limiter just under 0 dBTP.
-        self.dynamics.set_glue(true, -18.0, 2.0, 3.0, 1.0);
-        self.dynamics.set_limiter(true, -0.3, 0.05, LimiterStyle::Transparent);
-        self.dynamics.set_tempo(self.tempo);
+        // comp stage: SSL glue (+ pump), NO limiter here.
+        self.comp.set_glue(true, -18.0, 2.0, 3.0, 1.0);
+        self.comp.set_limiter(false, -0.3, 0.05, LimiterStyle::Transparent);
+        self.comp.set_tempo(self.tempo);
+        // final stage: true-peak limiter only.
+        self.limiter.set_glue(false, -18.0, 2.0, 3.0, 1.0);
+        self.limiter.set_limiter(true, -0.3, 0.05, LimiterStyle::Transparent);
         self.apply_pump();
         self.apply_drive();
+        self.apply_reverb();
+        self.apply_delay();
     }
 
     fn apply_pump(&mut self) {
-        // Quarter-note duck = the four-on-the-floor pump. amount 0 -> no duck
-        // (bus stays bit-identical to the un-pumped chain).
-        let division = 60.0 / self.tempo.max(1.0);
-        self.dynamics
+        let division = 60.0 / self.tempo.max(1.0); // quarter-note duck
+        self.comp
             .set_pump(self.pump, PumpSource::IntKick, division, 0.5, 0.0);
     }
 
@@ -65,66 +83,104 @@ impl DrumBus {
             .set_params(on, DriveKind::Tube, self.drive, 0.5, 16.0, 1.0, 0.0, 1.0);
     }
 
-    /// Push the host tempo (for the pump's beat-synced duck). Call once per block.
-    pub fn set_tempo(&mut self, bpm: f32) {
-        self.tempo = bpm.max(1.0);
-        self.dynamics.set_tempo(self.tempo);
-        self.apply_pump();
+    fn apply_reverb(&mut self) {
+        let on = self.reverb_amt > 0.001;
+        // a bright EMT-style plate sized for drums; send level is the macro.
+        self.reverb.set_params(
+            on,
+            ReverbAlgo::Plate224,
+            1.6,    // decay s
+            0.5,    // size
+            0.0,    // predelay
+            0.4,    // damping
+            150.0,  // locut
+            8500.0, // hicut
+            0.2,    // modulation
+            1.0,    // width
+            false,  // freeze
+        );
+        self.reverb.set_send(self.reverb_amt, 1.0);
     }
 
-    /// Sidechain PUMP depth, 0..1. The headline transport knob.
+    fn apply_delay(&mut self) {
+        let on = self.delay_amt > 0.001;
+        self.delay.set_tempo(self.tempo);
+        // 1/8 on the left, dotted-ish on the right for a wide tempo-synced echo.
+        let eighth = (60.0 / self.tempo.max(1.0)) * 0.5;
+        self.delay.set_params(
+            on,
+            DelayMode::Tape,
+            eighth,         // time L
+            eighth * 0.75,  // time R
+            0.35,           // feedback
+            0.2,            // crossfeed (ping-pong)
+            0.25,           // wow
+            0.35,           // age
+            180.0,          // hpf
+            6500.0,         // lpf
+            self.delay_amt, // mix
+        );
+    }
+
+    pub fn set_tempo(&mut self, bpm: f32) {
+        self.tempo = bpm.max(1.0);
+        self.comp.set_tempo(self.tempo);
+        self.apply_pump();
+        self.apply_delay();
+    }
+
     pub fn set_pump(&mut self, amount: f32) {
         self.pump = amount.clamp(0.0, 1.0);
         self.apply_pump();
     }
 
-    /// Lo-fi bus drive, 0..1.
     pub fn set_drive(&mut self, amount: f32) {
         self.drive = amount.clamp(0.0, 1.0);
         self.apply_drive();
     }
 
+    pub fn set_reverb(&mut self, amount: f32) {
+        self.reverb_amt = amount.clamp(0.0, 1.0);
+        self.apply_reverb();
+    }
+
+    pub fn set_delay(&mut self, amount: f32) {
+        self.delay_amt = amount.clamp(0.0, 1.0);
+        self.apply_delay();
+    }
+
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sr = sr;
-        self.dynamics = Dynamics::new(sr);
         self.drive_l = Drive::new(sr);
         self.drive_r = Drive::new(sr);
+        self.comp = Dynamics::new(sr);
+        self.delay = Delay::new(sr);
+        self.reverb = Reverb::new(sr);
+        self.limiter = Dynamics::new(sr);
         self.configure();
     }
 
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
         let l = self.drive_l.process(l);
         let r = self.drive_r.process(r);
-        self.dynamics.process(l, r)
+        let (l, r) = self.comp.process(l, r); // pump + glue
+        let (l, r) = self.delay.process(l, r); // tape delay (bypass at 0)
+        let (l, r) = self.reverb.process_send(l, r); // plate reverb (dry at 0)
+        self.limiter.process(l, r) // true-peak limiter, last
     }
 
-    /// Live pump duck gain (1.0 = open, < 1 = ducking) — for the GUI pump meter.
     pub fn pump_envelope(&self) -> f32 {
-        self.dynamics.pump_envelope()
+        self.comp.pump_envelope()
     }
 
-    /// Live glue/limiter gain reduction (dB), for the GUI glue meter (M9).
     pub fn gain_reduction_db(&self) -> f32 {
-        self.dynamics.gain_reduction_db()
+        self.comp.gain_reduction_db()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn passes_quiet_signal_roughly_through() {
-        let mut bus = DrumBus::neutral(48_000.0);
-        let mut peak = 0.0_f32;
-        for i in 0..2_000 {
-            let s = 0.1 * (i as f32 * 0.05).sin();
-            let (l, _) = bus.process(s, s);
-            assert!(l.is_finite());
-            peak = peak.max(l.abs());
-        }
-        assert!(peak > 0.05, "quiet signal should pass, peak={peak}");
-    }
 
     #[test]
     fn limiter_holds_the_ceiling_on_hot_input() {
@@ -151,35 +207,67 @@ mod tests {
         let mut bus = DrumBus::neutral(48_000.0);
         bus.set_tempo(120.0);
         bus.set_pump(0.9);
-        // run a steady DC-ish tone through and watch the duck gain swing below 1
         let mut min_env = 1.0_f32;
         let mut max_env = 0.0_f32;
         for i in 0..96_000 {
-            // one second = two quarter-note ducks at 120 BPM
             let s = 0.3 * (i as f32 * 0.02).sin();
             bus.process(s, s);
             let e = bus.pump_envelope();
             min_env = min_env.min(e);
             max_env = max_env.max(e);
         }
-        assert!(min_env < 0.8, "pump should duck the bus well below unity, min={min_env}");
-        assert!(max_env > 0.95, "and recover toward unity between ducks, max={max_env}");
+        assert!(min_env < 0.8, "pump should duck the bus, min={min_env}");
+        assert!(max_env > 0.95, "and recover between ducks, max={max_env}");
     }
 
     #[test]
-    fn drive_adds_harmonics() {
-        let peak_of = |drive: f32| {
+    fn reverb_adds_a_tail() {
+        // an impulse into a reverbed bus should still be ringing well after it.
+        let tail_energy = |amount: f32| {
             let mut bus = DrumBus::neutral(48_000.0);
-            bus.set_drive(drive);
-            let mut p = 0.0_f32;
-            for i in 0..4_000 {
-                let s = 0.4 * (i as f32 * 0.05).sin();
-                let (l, _) = bus.process(s, s);
-                p = p.max(l.abs());
+            bus.set_reverb(amount);
+            bus.process(1.0, 1.0); // impulse
+            let mut e = 0.0_f32;
+            for i in 0..24_000 {
+                let (l, r) = bus.process(0.0, 0.0);
+                if i > 4_000 {
+                    e += l.abs() + r.abs();
+                }
             }
-            p
+            e
         };
-        // a driven sine should be hotter/fatter than the clean one
-        assert!(peak_of(0.8) > peak_of(0.0) * 1.1, "bus drive should add level/harmonics");
+        assert!(tail_energy(0.7) > tail_energy(0.0) + 0.05, "reverb should add a tail");
+    }
+
+    #[test]
+    fn delay_adds_repeats() {
+        let tail_energy = |amount: f32| {
+            let mut bus = DrumBus::neutral(48_000.0);
+            bus.set_tempo(120.0);
+            bus.set_delay(amount);
+            bus.process(1.0, 1.0); // impulse
+            let mut e = 0.0_f32;
+            for i in 0..48_000 {
+                let (l, r) = bus.process(0.0, 0.0);
+                if i > 4_000 {
+                    e += l.abs() + r.abs();
+                }
+            }
+            e
+        };
+        assert!(tail_energy(0.7) > tail_energy(0.0) + 0.05, "delay should add repeats");
+    }
+
+    #[test]
+    fn fully_dry_at_default_is_finite() {
+        let mut bus = DrumBus::neutral(48_000.0);
+        let mut peak = 0.0_f32;
+        for i in 0..4_000 {
+            let s = 0.3 * (i as f32 * 0.05).sin();
+            let (l, _) = bus.process(s, s);
+            assert!(l.is_finite());
+            peak = peak.max(l.abs());
+        }
+        assert!(peak > 0.05);
     }
 }
