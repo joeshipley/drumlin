@@ -64,12 +64,22 @@ enum Action {
     Humanize { value: u8 },
     Transport { play: bool },
     SeqEnable { on: bool },
+    // Automatable param gestures (id: 0=gain, 1=pump, 2=bus_drive).
+    ParamBegin { id: u8 },
+    ParamSet { id: u8, value: f32 },
+    ParamEnd { id: u8 },
 }
 
 #[derive(Params)]
 struct DrumlinParams {
     #[id = "master_gain"]
     gain: FloatParam,
+    /// Sidechain PUMP depth — the headline French-house duck.
+    #[id = "pump"]
+    pump: FloatParam,
+    /// Lo-fi bus drive.
+    #[id = "bus_drive"]
+    bus_drive: FloatParam,
 }
 
 impl Default for DrumlinParams {
@@ -88,6 +98,14 @@ impl Default for DrumlinParams {
             .with_smoother(SmoothingStyle::Logarithmic(20.0))
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            pump: FloatParam::new("Pump", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            bus_drive: FloatParam::new("Bus Drive", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
         }
     }
 }
@@ -120,6 +138,8 @@ pub struct Drumlin {
     /// Current pattern slot, published for the GUI (auto-changes on a queued
     /// song-chain switch).
     cur_pattern: Arc<AtomicU8>,
+    /// Live pump duck gain (f32 bits, 1.0 = open), published for the GUI meter.
+    pump_meter: Arc<AtomicU32>,
     /// Effective playing state (host transport OR internal clock), published so
     /// the GUI PLAY indicator reflects host-driven playback too.
     effective_playing: Arc<AtomicBool>,
@@ -152,6 +172,7 @@ impl Default for Drumlin {
             playhead: Arc::new(AtomicI32::new(-1)),
             voice_active: Arc::new(AtomicU16::new(0)),
             cur_pattern: Arc::new(AtomicU8::new(0)),
+            pump_meter: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             effective_playing: Arc::new(AtomicBool::new(false)),
             seq_enabled: Arc::new(AtomicBool::new(true)),
             fx_reset_pending: Arc::new(AtomicBool::new(false)),
@@ -232,12 +253,14 @@ impl Plugin for Drumlin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let params = self.params.clone();
         let kbd_tx = Mutex::new(self.kbd_tx.take());
         let edit_tx = Mutex::new(self.edit_tx.take());
         let internal_play = self.internal_play.clone();
         let playhead = self.playhead.clone();
         let voice_active = self.voice_active.clone();
         let cur_pattern = self.cur_pattern.clone();
+        let pump_meter = self.pump_meter.clone();
         let effective_playing = self.effective_playing.clone();
         let seq_enabled = self.seq_enabled.clone();
         // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
@@ -254,7 +277,17 @@ impl Plugin for Drumlin {
             event.state == nih_plug_webview::KeyState::Down
                 && event.key == nih_plug_webview::Key::Escape
         })
-        .with_event_loop(move |ctx, _setter, _window| {
+        .with_event_loop(move |ctx, setter, _window| {
+            // All three params are FloatParam, so one macro maps id -> &param.
+            macro_rules! pget {
+                ($id:expr) => {{
+                    match $id {
+                        1u8 => &params.pump,
+                        2u8 => &params.bus_drive,
+                        _ => &params.gain,
+                    }
+                }};
+            }
             macro_rules! push_edit {
                 ($e:expr) => {{
                     if let Ok(mut tx) = edit_tx.lock() {
@@ -298,6 +331,11 @@ impl Plugin for Drumlin {
                     Action::Humanize { value } => push_edit!(SeqEdit::Humanize { value }),
                     Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
                     Action::SeqEnable { on } => seq_enabled.store(on, Ordering::Relaxed),
+                    Action::ParamBegin { id } => setter.begin_set_parameter(pget!(id)),
+                    Action::ParamSet { id, value } => {
+                        setter.set_parameter_normalized(pget!(id), value.clamp(0.0, 1.0))
+                    }
+                    Action::ParamEnd { id } => setter.end_set_parameter(pget!(id)),
                 }
             }
 
@@ -307,7 +345,12 @@ impl Plugin for Drumlin {
             let playing = effective_playing.load(Ordering::Relaxed);
             let seq_on = seq_enabled.load(Ordering::Relaxed);
             let pat = cur_pattern.load(Ordering::Relaxed);
-            let packed = ((pat as u32) << 24)
+            let pump_env = f32::from_bits(pump_meter.load(Ordering::Relaxed));
+            // Quantize the duck depth to a nibble so the meter sends ~at the duck
+            // rate (not every frame) yet stays still when the pump is open.
+            let duck = ((1.0 - pump_env).clamp(0.0, 1.0) * 15.0) as u32;
+            let packed = ((duck & 0xF) << 28)
+                | (((pat as u32) & 0xF) << 24)
                 | ((seq_on as u32) << 21)
                 | ((playing as u32) << 20)
                 | (((va as u32) & 0xFFF) << 8)
@@ -320,6 +363,7 @@ impl Plugin for Drumlin {
                     "playing": playing,
                     "seq": seq_on,
                     "pattern": pat,
+                    "pump": pump_env,
                 }));
             }
         });
@@ -410,6 +454,12 @@ impl Plugin for Drumlin {
         let tempo = transport.tempo.unwrap_or(120.0).max(1.0);
         let sr = self.sample_rate as f64;
         let block_len = buffer.samples();
+
+        // Once per block: push the bus FX params (the headline PUMP, lo-fi drive)
+        // and the tempo (for the beat-synced duck).
+        self.kit.set_bus_tempo(tempo as f32);
+        self.kit.set_pump(self.params.pump.value());
+        self.kit.set_bus_drive(self.params.bus_drive.value());
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);
@@ -500,6 +550,7 @@ impl Plugin for Drumlin {
         }
         self.voice_active.store(mask, Ordering::Relaxed);
         self.cur_pattern.store(self.seq.current_pattern() as u8, Ordering::Relaxed);
+        self.pump_meter.store(self.kit.pump_envelope().to_bits(), Ordering::Relaxed);
 
         ProcessStatus::KeepAlive
     }

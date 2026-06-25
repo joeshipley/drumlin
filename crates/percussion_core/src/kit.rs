@@ -209,6 +209,27 @@ impl DrumKit {
         self.bus.gain_reduction_db()
     }
 
+    // --- bus FX (M7) ---
+    /// Push the host tempo to the bus (for the beat-synced PUMP). Once per block.
+    pub fn set_bus_tempo(&mut self, bpm: f32) {
+        self.bus.set_tempo(bpm);
+    }
+
+    /// Sidechain PUMP depth, 0..1.
+    pub fn set_pump(&mut self, amount: f32) {
+        self.bus.set_pump(amount);
+    }
+
+    /// Lo-fi bus drive, 0..1.
+    pub fn set_bus_drive(&mut self, amount: f32) {
+        self.bus.set_drive(amount);
+    }
+
+    /// Live pump duck gain (1.0 = open) for the GUI pump meter.
+    pub fn pump_envelope(&self) -> f32 {
+        self.bus.pump_envelope()
+    }
+
     /// Panic-reset: silence every voice and clear filter/tail state.
     pub fn reset(&mut self) {
         for v in &mut self.voices {

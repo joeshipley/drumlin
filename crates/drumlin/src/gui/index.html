@@ -28,7 +28,9 @@
   .btn.on { color: var(--bg); background: var(--accent); border-color: var(--accent); box-shadow: 0 0 12px rgba(224,163,62,0.45); }
   .fill { cursor: pointer; color: var(--accent); border-color: rgba(224,163,62,0.4); }
   .fill.held { color: var(--bg); background: var(--accent); }
-  .pump { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; box-shadow: 0 0 12px rgba(224,163,62,0.4); }
+  .pump { color: var(--accent); border-color: rgba(224,163,62,0.5); display: flex; gap: 6px; align-items: center; font-weight: 600; }
+  .duck { width: 26px; height: 5px; background: var(--track); border-radius: 3px; overflow: hidden; }
+  .duck .duckfill { display: block; height: 100%; width: 0%; background: var(--accent); box-shadow: 0 0 6px var(--accent); transition: width 30ms linear; }
   .slid { display: flex; align-items: center; gap: 6px; }
   input[type=range] { -webkit-appearance: none; height: 3px; background: var(--track); border-radius: 2px; outline: none; }
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); cursor: pointer; }
@@ -103,7 +105,8 @@
       <div class="chip slid">HM <input type="range" id="human" min="0" max="100" value="0" style="width:48px"><b id="humanv">0</b></div>
       <div class="spacer"></div>
       <div class="pats" id="pats"></div>
-      <div class="chip pump">PUMP</div>
+      <div class="chip pump" title="Sidechain pump — the French-house duck (beat-synced)">PUMP <input type="range" id="pump" min="0" max="1000" value="0" style="width:56px"><span class="duck"><span class="duckfill" id="duckfill"></span></span></div>
+      <div class="chip slid">DRV <input type="range" id="drive" min="0" max="1000" value="0" style="width:44px"></div>
     </div>
 
     <div class="band">
@@ -341,6 +344,17 @@
   const humanEl = document.getElementById("human"), humanV = document.getElementById("humanv");
   humanEl.addEventListener("input", () => { human = +humanEl.value; humanV.textContent = human; send({ type: "humanize", value: human }); });
 
+  // ---- automatable bus params via the gesture bridge: PUMP (id 1), DRIVE (id 2) ----
+  function paramSlider(id, el) {
+    let dragging = false;
+    el.addEventListener("pointerdown", () => { dragging = true; send({ type: "param-begin", id }); send({ type: "param-set", id, value: +el.value / 1000 }); });
+    el.addEventListener("input", () => send({ type: "param-set", id, value: +el.value / 1000 }));
+    window.addEventListener("pointerup", () => { if (dragging) { dragging = false; send({ type: "param-end", id }); } });
+  }
+  paramSlider(1, document.getElementById("pump"));
+  paramSlider(2, document.getElementById("drive"));
+  const duckfill = document.getElementById("duckfill");
+
   // ---- pads ----
   const padsEl = document.getElementById("pads");
   LANES.forEach((nm, i) => {
@@ -380,6 +394,7 @@
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";
       if ("seq" in msg) { seqOn = msg.seq; seqBtn.classList.toggle("on", seqOn); }
+      if ("pump" in msg) duckfill.style.width = ((1 - msg.pump) * 100).toFixed(0) + "%";
       if ("pattern" in msg && msg.pattern !== cur) { cur = msg.pattern; patEls.forEach(e => e.classList.remove("queued")); refreshGridFromBank(); }
     }
   };
