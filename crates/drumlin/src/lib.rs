@@ -97,6 +97,9 @@ struct DrumlinParams {
     /// Parallel/NY compression blend.
     #[id = "parallel"]
     parallel: FloatParam,
+    /// Transient PUNCH (attack emphasis) on the bus.
+    #[id = "punch"]
+    punch: FloatParam,
 
     /// Out-of-band state the host can't reach through plain params: the full
     /// pattern bank (steps, p-locks, grooves) and the SEQ master-enable.
@@ -162,6 +165,10 @@ impl Default for DrumlinParams {
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
             parallel: FloatParam::new("Parallel Comp", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            punch: FloatParam::new("Punch", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
@@ -371,6 +378,7 @@ impl Plugin for Drumlin {
                         5u8 => &params.pump_rate,
                         6u8 => &params.pump_curve,
                         7u8 => &params.parallel,
+                        8u8 => &params.punch,
                         _ => &params.gain,
                     }
                 }};
@@ -583,6 +591,7 @@ impl Plugin for Drumlin {
         self.kit.set_pump_rate(self.params.pump_rate.value());
         self.kit.set_pump_curve(self.params.pump_curve.value());
         self.kit.set_bus_parallel(self.params.parallel.value());
+        self.kit.set_bus_transient(self.params.punch.value());
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);

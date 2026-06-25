@@ -250,6 +250,11 @@ impl DrumKit {
         self.bus.set_parallel(amount);
     }
 
+    /// Transient PUNCH (attack emphasis), 0..1.
+    pub fn set_bus_transient(&mut self, amount: f32) {
+        self.bus.set_transient(amount);
+    }
+
     /// Live pump duck gain (1.0 = open) for the GUI pump meter.
     pub fn pump_envelope(&self) -> f32 {
         self.bus.pump_envelope()

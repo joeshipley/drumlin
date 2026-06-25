@@ -130,6 +130,7 @@
       <div class="pads" id="pads"></div>
       <div class="busfx">
         <div class="busfx-h">BUS FX</div>
+        <div class="busfx-row" title="Transient punch (attack emphasis)"><label>PUNCH</label><input type="range" id="punch" min="0" max="1000" value="0"></div>
         <div class="busfx-row"><label>DRIVE</label><input type="range" id="drive" min="0" max="1000" value="0"></div>
         <div class="busfx-row" title="Parallel / NY compression"><label>COMP</label><input type="range" id="parallel" min="0" max="1000" value="0"></div>
         <div class="busfx-row"><label>SPACE</label><input type="range" id="reverb" min="0" max="1000" value="0"></div>
@@ -371,6 +372,7 @@
   paramSlider(5, document.getElementById("pumprate"));
   paramSlider(6, document.getElementById("pumpcurve"));
   paramSlider(7, document.getElementById("parallel"));
+  paramSlider(8, document.getElementById("punch"));
   const duckfill = document.getElementById("duckfill");
 
   // ---- pads ----

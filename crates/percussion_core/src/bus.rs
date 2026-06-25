@@ -3,9 +3,18 @@
 //! instrument.
 //!
 //! Signal flow (design §5.3 order, true-peak limiter LAST):
-//!   kit sum → bus drive → comp (sidechain PUMP → SSL glue) → PARALLEL/NY comp
-//!            → tape/stereo DELAY → plate REVERB send → true-peak limiter
+//!   kit sum → transient PUNCH → bus drive → comp (sidechain PUMP → SSL glue)
+//!            → PARALLEL/NY comp → tape/stereo DELAY → plate REVERB → limiter
 //!
+//! Two intentional deviations from §5.3's numbering: the true-peak limiter is
+//! moved to genuinely LAST (so delay/reverb sit before it), and PUMP is fused
+//! with glue into the single `comp` stage and therefore precedes PARALLEL —
+//! whereas §5.3 numbers pump (#5) after parallel (#4). Fusing pump+glue is the
+//! conventional bus-comp gesture, and having the parallel/NY stage squash the
+//! already-pumped signal is intended.
+//!
+//! - **PUNCH** (M7 pt3) — `TransientShaper` at the head of the chain: attack
+//!   emphasis on the summed kit. True bypass at amount 0.
 //! - **PUMP** (M7) — `Dynamics::set_pump` (`IntKick`, beat-synced duck): the
 //!   Daft-Punk/French-house breathe. `pump_envelope()` drives the GUI duck meter.
 //!   M7 pt3 exposes its **rate** (note division) and **curve** (duck shape).
@@ -16,17 +25,20 @@
 //!   tempo-aware, and a true bypass (dry passthrough) at amount 0.
 //! - **glue + true-peak limiter** (M3).
 //!
-//! At the Neutral defaults (pump/drive/reverb/delay/parallel all 0, and pump
-//! rate/curve at their factory centers reproducing the original quarter-note,
-//! 0.5-curve duck) the chain is a pure passthrough into glue → limiter, so the
-//! golden anchors are unaffected.
+//! At the Neutral defaults (punch/pump/drive/reverb/delay/parallel all 0, and
+//! pump rate/curve at their factory centers reproducing the original quarter-
+//! note, 0.5-curve duck) the chain is a pure passthrough into glue → limiter, so
+//! the golden anchors are unaffected.
 //!
-//! Still to come: a transient shaper (one new `synth_core` module) at the head
-//! of the chain, and — deferred to **M8** — the snare **gated-verb** send, which
-//! needs per-voice send routing (the snare tapped separately into the reverb,
-//! gated on its return) that does not exist while the kit sums into one bus.
+//! Deferred to **M8**: the snare **gated-verb** send, which needs per-voice send
+//! routing (the snare tapped separately into the reverb, gated on its return)
+//! that does not exist while the kit sums into one bus — it pairs with M8's
+//! Send A infrastructure and a new return-gate primitive.
 
-use synth_core::{Delay, DelayMode, Drive, DriveKind, Dynamics, LimiterStyle, PumpSource, Reverb, ReverbAlgo};
+use synth_core::{
+    Delay, DelayMode, Drive, DriveKind, Dynamics, LimiterStyle, PumpSource, Reverb, ReverbAlgo,
+    TransientShaper,
+};
 
 /// Pump **rate** divisions as quarter-note (beat) multiples: 1/1, 1/2, 1/4, 1/8,
 /// 1/16. The normalized macro quantizes into this table; the factory center
@@ -41,6 +53,8 @@ fn pump_rate_beats(norm: f32) -> f32 {
 }
 
 pub struct DrumBus {
+    transient_l: TransientShaper, // PUNCH, at the head of the chain
+    transient_r: TransientShaper,
     drive_l: Drive,
     drive_r: Drive,
     comp: Dynamics,     // pump + glue (limiter handled separately so FX sit before it)
@@ -54,7 +68,8 @@ pub struct DrumBus {
     pump_rate: f32,  // normalized -> PUMP_RATE_BEATS division
     pump_curve: f32, // duck shape, 0..1
     drive: f32,
-    parallel_amt: f32, // 0 = dry, 1 = full NY blend added under the bus
+    transient_amt: f32, // PUNCH, 0..1 -> attack emphasis
+    parallel_amt: f32,  // 0 = dry, 1 = full NY blend added under the bus
     reverb_amt: f32,
     delay_amt: f32,
 }
@@ -62,6 +77,8 @@ pub struct DrumBus {
 impl DrumBus {
     pub fn neutral(sr: f32) -> Self {
         let mut bus = Self {
+            transient_l: TransientShaper::new(sr),
+            transient_r: TransientShaper::new(sr),
             drive_l: Drive::new(sr),
             drive_r: Drive::new(sr),
             comp: Dynamics::new(sr),
@@ -75,6 +92,7 @@ impl DrumBus {
             pump_rate: 0.5,  // 1/4 note — the original duck
             pump_curve: 0.5, // the original duck shape
             drive: 0.0,
+            transient_amt: 0.0,
             parallel_amt: 0.0,
             reverb_amt: 0.0,
             delay_amt: 0.0,
@@ -99,8 +117,15 @@ impl DrumBus {
         self.limiter.set_limiter(true, -0.3, 0.05, LimiterStyle::Transparent);
         self.apply_pump();
         self.apply_drive();
+        self.apply_transient();
         self.apply_reverb();
         self.apply_delay();
+    }
+
+    fn apply_transient(&mut self) {
+        // PUNCH macro drives the attack only (bus use); 0 = true bypass.
+        self.transient_l.set_params(self.transient_amt, 0.0);
+        self.transient_r.set_params(self.transient_amt, 0.0);
     }
 
     fn apply_pump(&mut self) {
@@ -182,6 +207,12 @@ impl DrumBus {
         self.apply_pump();
     }
 
+    /// Transient PUNCH (attack emphasis), 0..1 (0 = true bypass).
+    pub fn set_transient(&mut self, amount: f32) {
+        self.transient_amt = amount.clamp(0.0, 1.0);
+        self.apply_transient();
+    }
+
     /// Parallel/NY compression blend, 0..1 (0 = dry passthrough).
     pub fn set_parallel(&mut self, amount: f32) {
         self.parallel_amt = amount.clamp(0.0, 1.0);
@@ -204,6 +235,8 @@ impl DrumBus {
 
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sr = sr;
+        self.transient_l = TransientShaper::new(sr);
+        self.transient_r = TransientShaper::new(sr);
         self.drive_l = Drive::new(sr);
         self.drive_r = Drive::new(sr);
         self.comp = Dynamics::new(sr);
@@ -215,6 +248,8 @@ impl DrumBus {
     }
 
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let l = self.transient_l.process(l); // PUNCH (bypass at 0)
+        let r = self.transient_r.process(r);
         let l = self.drive_l.process(l);
         let r = self.drive_r.process(r);
         let (l, r) = self.comp.process(l, r); // pump + glue
@@ -280,6 +315,31 @@ mod tests {
         }
         assert!(min_env < 0.8, "pump should duck the bus, min={min_env}");
         assert!(max_env > 0.95, "and recover between ducks, max={max_env}");
+    }
+
+    #[test]
+    fn transient_punch_is_dry_at_zero_and_active_when_engaged() {
+        // At 0 the head-of-chain shaper must be exact-dry vs a bus that never
+        // engaged it (the golden-safety guard); engaging PUNCH changes the bus
+        // output. (The peak-emphasis itself is verified in synth_core's
+        // TransientShaper unit tests — here the glue+limiter after it would mask
+        // a peak delta, so we assert the stage is genuinely doing work.)
+        let diff_vs_dry = |amount: f32| {
+            let mut bus = DrumBus::neutral(48_000.0);
+            bus.set_transient(amount);
+            let mut dry = DrumBus::neutral(48_000.0);
+            let mut diff = 0.0_f32;
+            for i in 0..2_000 {
+                let env = (-(i as f32) / 48_000.0 * 22.0).exp();
+                let s = 0.5 * env * (i as f32 * 0.12).sin();
+                let (l, _) = bus.process(s, s);
+                let (dl, _) = dry.process(s, s);
+                diff += (l - dl).abs();
+            }
+            diff
+        };
+        assert_eq!(diff_vs_dry(0.0), 0.0, "transient at 0 must be exact dry passthrough");
+        assert!(diff_vs_dry(0.9) > 0.001, "engaging PUNCH must change the bus output");
     }
 
     #[test]
