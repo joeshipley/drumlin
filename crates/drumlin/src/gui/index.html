@@ -64,6 +64,13 @@
   .hdr-num.beat { color: var(--dim); }
   .hdr-num.play { color: var(--accent); }
 
+  .voice-wrap { flex: 1; padding: 16px 22px; overflow: auto; }
+  .voice-h { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); margin-bottom: 14px; }
+  .voice-tracks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
+  .voice-trk { font-family: var(--mono); font-size: 9px; letter-spacing: 0.5px; color: var(--dim); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 7px 11px; cursor: default; }
+  .voice-trk.on { color: var(--accent); border-color: rgba(224,163,62,0.5); background: rgba(224,163,62,0.12); }
+  .voice-params { max-width: 480px; }
+  .voice-hint { margin-top: 20px; max-width: 480px; font-size: 10px; color: var(--dim-3); line-height: 1.6; }
   .insp { width: 232px; flex: 0 0 232px; background: var(--panel-2); border-left: 1px solid var(--border); padding: 11px 12px; overflow-y: auto; font-size: 11px; }
   .insp h4 { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; margin: 12px 0 7px; }
   .insp h4:first-child { margin-top: 0; }
@@ -115,8 +122,8 @@
 
     <div class="band">
       <div class="rail">
-        <div class="rail-btn on">GRID</div>
-        <div class="rail-btn">VOICE</div>
+        <div class="rail-btn on" data-view="grid">GRID</div>
+        <div class="rail-btn" data-view="voice">VOICE</div>
         <div class="rail-btn">MIX</div>
         <div class="rail-btn">MOD</div>
         <div class="rail-btn">BUS FX</div>
@@ -124,6 +131,12 @@
       </div>
       <div class="grid-wrap"><div class="grid" id="grid"></div></div>
       <div class="insp" id="insp"></div>
+      <div class="voice-wrap" id="voiceView" style="display:none">
+        <div class="voice-h">VOICE · per-track tone &amp; level</div>
+        <div class="voice-tracks" id="voiceTracks"></div>
+        <div class="voice-params" id="voiceParams"></div>
+        <div class="voice-hint">Edits set each track's default; per-step <b>p-locks</b> still override per hit. Saved with the project.</div>
+      </div>
     </div>
 
     <div class="footer">
@@ -385,6 +398,56 @@
     padsEl.appendChild(d);
   });
 
+  // ---- VOICE editor (per-track tone/level defaults) ----
+  // voiceVals[track] = [level, pan, cutoff, reso, drive] normalized 0..1,
+  // seeded from the engine on Init. Same encoding as p-locks.
+  let voiceVals = Array.from({length: N_TRACKS}, () => [0.5, 0.5, 1.0, 0.0, 0.0]);
+  let voiceTrack = 0;
+  const VOICE_PARAMS = [["LEVEL", 0], ["PAN", 1], ["CUTOFF", 2], ["RESO", 3], ["DRIVE", 4]];
+  const voiceTracksEl = document.getElementById("voiceTracks");
+  const voiceParamsEl = document.getElementById("voiceParams");
+  function buildVoiceTracks() {
+    voiceTracksEl.innerHTML = "";
+    LANES.forEach((nm, t) => {
+      const d = document.createElement("div");
+      d.className = "voice-trk" + (t === voiceTrack ? " on" : "");
+      d.textContent = nm;
+      d.addEventListener("click", () => { voiceTrack = t; buildVoiceTracks(); buildVoiceParams(); });
+      voiceTracksEl.appendChild(d);
+    });
+  }
+  function buildVoiceParams() {
+    voiceParamsEl.innerHTML = "";
+    VOICE_PARAMS.forEach(([lbl, idx]) => {
+      const val = Math.round((voiceVals[voiceTrack][idx] ?? 0) * 1000);
+      const row = mkSlider(lbl, 0, 1000, val, v => (v / 10).toFixed(0) + "%", v => {
+        voiceVals[voiceTrack][idx] = v / 1000;
+        send({ type: "set-voice-param", track: voiceTrack, param: idx, value: v / 1000 });
+      });
+      voiceParamsEl.appendChild(row);
+    });
+  }
+  function buildVoice() { buildVoiceTracks(); buildVoiceParams(); }
+
+  // ---- rail panel switching (GRID + VOICE wired this milestone) ----
+  let curView = "grid";
+  const gridWrapEl = document.querySelector(".grid-wrap");
+  const inspWrapEl = document.getElementById("insp");
+  const voiceViewEl = document.getElementById("voiceView");
+  function setView(name) {
+    curView = name;
+    document.querySelectorAll(".rail-btn").forEach(b => b.classList.toggle("on", b.dataset.view === name));
+    const grid = name === "grid";
+    gridWrapEl.style.display = grid ? "" : "none";
+    inspWrapEl.style.display = grid ? "" : "none";
+    voiceViewEl.style.display = name === "voice" ? "" : "none";
+    if (name === "voice") buildVoice();
+  }
+  document.querySelector(".rail").addEventListener("click", (e) => {
+    const btn = e.target.closest(".rail-btn");
+    if (btn && btn.dataset.view) setView(btn.dataset.view);
+  });
+
   // ---- playhead + status ----
   function setPlayhead(col) {
     if (col === playCol) return;
@@ -413,6 +476,10 @@
       LENGTH = cp.length; swing = cp.swing; human = cp.humanize;
       swingEl.value = swing; swingV.textContent = swing; humanEl.value = human; humanV.textContent = human;
       buildGrid(); renderInsp(); refreshPats();
+      // Seed the VOICE editor's per-track defaults (normalized). Rebuild
+      // unconditionally so a panel opened before the seed lands repaints with
+      // the real (non-uniform) per-track values, not the placeholder fallback.
+      if (msg.voicepatch) { voiceVals = msg.voicepatch; buildVoice(); }
     } else if (msg.type === "status") {
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";

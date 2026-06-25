@@ -25,6 +25,30 @@ struct TrackBase {
     drive_on: bool,
 }
 
+/// A kit's per-voice **patch**: each track's default values for the lockable
+/// tail params (Level, Pan, Cutoff, Resonance, Drive), in `LockableParam` index
+/// order. This is what the GUI VOICE editor edits and what the host project
+/// persists. Stored in **engine units** (a lossless `f32` copy of `base[]`), so
+/// `import_patch` of a `Default` patch reproduces `DrumKit::neutral`'s base
+/// exactly — the default render stays byte-identical with no special-casing.
+/// (The GUI wire protocol stays normalized `0..1`; the plugin normalizes on the
+/// way out and `set_voice_param` denormalizes on the way in.)
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VoicePatch {
+    pub tracks: [[f32; LockableParam::COUNT]; MAX_TRACKS],
+}
+
+impl Default for VoicePatch {
+    fn default() -> Self {
+        // Derive from the Neutral kit so the defaults never drift from neutral().
+        // (base[] is sample-rate independent, so any rate yields the same patch.)
+        let mut p = Self { tracks: [[0.0; LockableParam::COUNT]; MAX_TRACKS] };
+        DrumKit::neutral(48_000.0).export_patch_into(&mut p);
+        p
+    }
+}
+
 /// Default track layout (design §3.2): index -> role.
 /// 0 KICK · 1 KICK2 · 2 SNARE · 3 CLAP · 4 RIM · 5 CLHAT · 6 OPHAT ·
 /// 7 RIDE · 8 TOM_LO · 9 TOM_HI · 10 PERC · 11 SAMPLE
@@ -180,6 +204,91 @@ impl DrumKit {
         self.tail_dirty[track] = !plocks.is_empty();
     }
 
+    /// Write a track's tail from its current `base` defaults and clear its dirty
+    /// flag — the tail now equals the patch default, so the next unlocked hit
+    /// needs no restore and the `apply_plocks` fast path stays valid.
+    fn seed_tail_from_base(&mut self, track: usize) {
+        let b = self.base[track];
+        let tail = &mut self.tails[track];
+        tail.set_level(b.level);
+        tail.set_pan(b.pan);
+        tail.set_lp_cutoff(b.cutoff);
+        tail.set_resonance(b.resonance);
+        tail.set_drive_amount(b.drive_on, b.drive_amt);
+        self.tail_dirty[track] = false;
+    }
+
+    /// Set a track's DEFAULT value for one lockable tail param — the patch the
+    /// GUI VOICE editor edits. `norm` is the same normalized `0..1` the p-lock
+    /// layer uses. Updates the restore base and re-seeds the tail so the change
+    /// is audible immediately (and `base == tail`, so no p-lock dirtying).
+    pub fn set_voice_param(&mut self, track: usize, param: u16, norm: f32) {
+        if track >= MAX_TRACKS {
+            return;
+        }
+        let Some(p) = LockableParam::from_index(param) else {
+            return;
+        };
+        let v = p.denormalize(norm);
+        let b = &mut self.base[track];
+        match p {
+            LockableParam::Level => b.level = v,
+            LockableParam::Pan => b.pan = v,
+            LockableParam::Cutoff => b.cutoff = v,
+            LockableParam::Resonance => b.resonance = v,
+            LockableParam::Drive => {
+                b.drive_amt = v;
+                b.drive_on = v > 0.001; // same threshold as apply_plocks
+            }
+        }
+        self.seed_tail_from_base(track);
+    }
+
+    /// Snapshot every track's patch defaults (engine units) for persistence.
+    /// Allocation-free — writes into the caller's array.
+    pub fn export_patch_into(&self, patch: &mut VoicePatch) {
+        for t in 0..MAX_TRACKS {
+            let b = self.base[t];
+            patch.tracks[t] = [b.level, b.pan, b.cutoff, b.resonance, b.drive_amt];
+        }
+    }
+
+    /// Adopt a persisted patch (host project load): write every track's defaults
+    /// and re-seed its tail. A `Default` patch reproduces `neutral()` exactly.
+    pub fn import_patch(&mut self, patch: &VoicePatch) {
+        for t in 0..MAX_TRACKS {
+            let v = patch.tracks[t];
+            let b = &mut self.base[t];
+            b.level = v[0];
+            b.pan = v[1];
+            b.cutoff = v[2];
+            b.resonance = v[3];
+            b.drive_amt = v[4];
+            b.drive_on = v[4] > 0.001;
+            self.seed_tail_from_base(t);
+        }
+    }
+
+    /// A track's current patch default for one lockable param, normalized `0..1`
+    /// (for seeding the GUI VOICE editor).
+    pub fn voice_param(&self, track: usize, param: u16) -> f32 {
+        if track >= MAX_TRACKS {
+            return 0.0;
+        }
+        let Some(p) = LockableParam::from_index(param) else {
+            return 0.0;
+        };
+        let b = self.base[track];
+        let eng = match p {
+            LockableParam::Level => b.level,
+            LockableParam::Pan => b.pan,
+            LockableParam::Cutoff => b.cutoff,
+            LockableParam::Resonance => b.resonance,
+            LockableParam::Drive => b.drive_amt,
+        };
+        p.normalize(eng)
+    }
+
     /// Sum all voices through their tails, then the glue/limiter bus, to a stereo
     /// frame.
     pub fn render(&mut self) -> (f32, f32) {
@@ -295,6 +404,38 @@ pub fn track_for_note(note: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neutral_patch_round_trips_and_default_import_is_a_no_op() {
+        // A fresh Neutral kit's exported patch equals VoicePatch::default()...
+        let kit = DrumKit::neutral(48_000.0);
+        let mut exported = VoicePatch { tracks: [[0.0; LockableParam::COUNT]; MAX_TRACKS] };
+        kit.export_patch_into(&mut exported);
+        assert_eq!(exported, VoicePatch::default(), "neutral export must equal the default patch");
+
+        // ...and importing the default patch leaves base[] byte-for-byte intact
+        // (the golden guard: a fresh/un-edited project changes nothing).
+        let mut k1 = DrumKit::neutral(48_000.0);
+        let before: Vec<_> = (0..MAX_TRACKS).map(|t| k1.base[t]).map(|b| (b.level, b.pan, b.cutoff, b.resonance, b.drive_amt, b.drive_on)).collect();
+        k1.import_patch(&VoicePatch::default());
+        let after: Vec<_> = (0..MAX_TRACKS).map(|t| k1.base[t]).map(|b| (b.level, b.pan, b.cutoff, b.resonance, b.drive_amt, b.drive_on)).collect();
+        assert_eq!(before, after, "default-patch import must not move any base value");
+    }
+
+    #[test]
+    fn set_voice_param_edits_the_default_and_round_trips() {
+        let mut kit = DrumKit::neutral(48_000.0);
+        // Edit track 2 (snare) cutoff to ~mid.
+        kit.set_voice_param(2, LockableParam::Cutoff.index(), 0.6);
+        let got = kit.voice_param(2, LockableParam::Cutoff.index());
+        assert!((got - 0.6).abs() < 1e-4, "voice param must read back what was set, got {got}");
+        // Export -> import (engine units) is lossless.
+        let mut p = VoicePatch::default();
+        kit.export_patch_into(&mut p);
+        let mut k2 = DrumKit::neutral(48_000.0);
+        k2.import_patch(&p);
+        assert!((k2.voice_param(2, LockableParam::Cutoff.index()) - got).abs() < 1e-6, "patch round-trip lossless");
+    }
 
     #[test]
     fn note_map_matches_layout() {

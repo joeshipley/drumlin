@@ -400,7 +400,7 @@ mod tests {
             bus.set_pump_rate(rate);
             let mut crossings = 0;
             let mut prev = 1.0_f32;
-            for i in 0..96_000 {
+            for _ in 0..96_000 {
                 bus.process(0.0, 0.0);
                 let e = bus.pump_envelope();
                 if prev >= 0.85 && e < 0.85 {

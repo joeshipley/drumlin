@@ -1,9 +1,11 @@
 //! `VoiceTail` — the uniform per-voice post-engine chain (design §3.1/§6.3):
 //! optional saturation → CS-80 dual filter (resonant HP → LP) → level → pan.
-//! Every track runs through one so the UI and mod matrix stay regular. Sends
-//! (reverb/delay) and the pitch/decay trims join with the bus FX + VOICE editor
-//! (M4/M7). Each channel has independent filter/drive state so a stereo voice
-//! (the clap) keeps its width.
+//! Every track runs through one so the UI and mod matrix stay regular. The
+//! lockable tail params (Level/Pan/Cutoff/Resonance/Drive) are user-editable
+//! per-track defaults via the VOICE editor (M8); per-voice pitch/decay trims are
+//! not lockable and arrive with the mod infrastructure (M6), and per-voice
+//! reverb/delay Sends land with Send A/B (M8). Each channel has independent
+//! filter/drive state so a stereo voice (the clap) keeps its width.
 
 use synth_core::{Drive, DriveKind, Filter};
 

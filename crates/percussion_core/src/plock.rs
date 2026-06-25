@@ -97,6 +97,20 @@ impl LockableParam {
             LockableParam::Drive => n,                       // 0..1
         }
     }
+
+    /// Inverse of [`denormalize`](Self::denormalize): engine units back to a
+    /// normalized `0..1`. Lets the VOICE editor + persistence store a track's
+    /// patch defaults in the same encoding p-locks use.
+    pub fn normalize(self, eng: f32) -> f32 {
+        let v = match self {
+            LockableParam::Level => eng / 2.0,
+            LockableParam::Pan => (eng + 1.0) / 2.0,
+            LockableParam::Cutoff => (eng.max(1.0) / 20.0).ln() / 1000.0_f32.ln(),
+            LockableParam::Resonance => eng,
+            LockableParam::Drive => eng,
+        };
+        v.clamp(0.0, 1.0)
+    }
 }
 
 /// The registry, in index order. A p-lock's `param` field indexes this.
@@ -143,5 +157,19 @@ mod tests {
         assert!((LockableParam::Level.denormalize(0.5) - 1.0).abs() < 1e-6);
         assert!((LockableParam::Cutoff.denormalize(0.0) - 20.0).abs() < 1e-3);
         assert!((LockableParam::Cutoff.denormalize(1.0) - 20_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn normalize_is_the_inverse_of_denormalize() {
+        for &p in LOCKABLE_PARAMS.iter() {
+            for &n in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let round = p.normalize(p.denormalize(n));
+                assert!((round - n).abs() < 1e-5, "{p:?} round-trip {n} -> {round}");
+            }
+        }
+        // The watch-out case: the Neutral tail's defaults map to clean norms.
+        assert!((LockableParam::Cutoff.normalize(20_000.0) - 1.0).abs() < 1e-4);
+        assert!((LockableParam::Level.normalize(1.0) - 0.5).abs() < 1e-6);
+        assert!((LockableParam::Pan.normalize(0.0) - 0.5).abs() < 1e-6);
     }
 }
