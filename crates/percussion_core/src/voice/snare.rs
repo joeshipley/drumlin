@@ -4,7 +4,7 @@
 //! crisp for the clean Neutral kit.
 
 use crate::pitch_env::DahdEnv;
-use dsp_core::{Filter, Noise, NoiseType, Oscillator, Waveform};
+use synth_core::{Filter, Noise, NoiseType, Oscillator, Waveform};
 
 pub struct SnareVoice {
     sr: f32,

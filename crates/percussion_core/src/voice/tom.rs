@@ -4,7 +4,7 @@
 
 use crate::pitch_env::DahdEnv;
 use crate::resonator::Resonator;
-use dsp_core::{Noise, NoiseType, Oscillator, Waveform};
+use synth_core::{Noise, NoiseType, Oscillator, Waveform};
 
 pub struct TomVoice {
     sr: f32,

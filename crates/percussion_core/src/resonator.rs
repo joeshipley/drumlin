@@ -5,7 +5,7 @@
 //! recursive poles — the project-wide RT-safety invariant.
 
 use core::f32::consts::PI;
-use dsp_core::flush_denormal;
+use synth_core::flush_denormal;
 
 const MAX_PARTIALS: usize = 4;
 

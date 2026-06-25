@@ -4,7 +4,7 @@
 
 use crate::metal_cluster::MetalCluster;
 use crate::pitch_env::DahdEnv;
-use dsp_core::Filter;
+use synth_core::Filter;
 
 pub struct HatVoice {
     sr: f32,

@@ -27,7 +27,6 @@ path = "src/main.rs"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["assert_process_allocs", "standalone"] }
 
 # The shared family DSP (copied from Esker). Zero external deps.
-dsp_core = { path = "../dsp_core" }
 percussion_core = { path = "../percussion_core" }
 
 # Custom webview-based editor. Vendored copy of the same fork Esker uses, patched

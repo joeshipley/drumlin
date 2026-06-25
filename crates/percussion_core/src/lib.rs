@@ -3,7 +3,7 @@
 //! The percussion peer of Esker's `synth_core`: pure logic + DSP, no plugin or
 //! host types, inline-tested, real-time-safe (fixed-size state, no audio-thread
 //! allocation, `flush_denormal` on every recursive write). It builds on the
-//! shared `dsp_core` primitives (oscillator, noise, filter, drive) and adds the
+//! shared `synth_core` primitives (oscillator, noise, filter, drive) and adds the
 //! percussion-specific generators (`DahdEnv`, `MetalCluster`, `ClapDiffuser`).
 //!
 //! M2 scope: Kick, Snare, Closed/Open Hat and Clap voices; choke groups; a

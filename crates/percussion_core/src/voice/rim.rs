@@ -3,7 +3,7 @@
 
 use crate::pitch_env::DahdEnv;
 use crate::resonator::Resonator;
-use dsp_core::{Noise, NoiseType};
+use synth_core::{Noise, NoiseType};
 
 pub struct RimVoice {
     sr: f32,

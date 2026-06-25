@@ -6,3 +6,8 @@ xtask = "run --package xtask --release --"
 # the latest version that DOES build on our toolchain instead of erroring.
 [resolver]
 incompatible-rust-versions = "fallback"
+
+# Fetch git dependencies (the shared synth_core) over the system git + SSH key,
+# so the private repo authenticates with your credentials.
+[net]
+git-fetch-with-cli = true

@@ -4,7 +4,7 @@
 //! why one trigger sounds like a couple of hands clapping at once.
 
 use crate::clap_diffuser::ClapDiffuser;
-use dsp_core::Filter;
+use synth_core::Filter;
 
 pub struct ClapVoice {
     sr: f32,

@@ -10,7 +10,7 @@
 //! Output is a normalized `0.0..=1.0` contour. It is `Copy`, allocation-free,
 //! and `flush_denormal`s its recursive decay state.
 
-use dsp_core::flush_denormal;
+use synth_core::flush_denormal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {

@@ -3,7 +3,7 @@
 //! cluster's six oscillators, essentially — the famous 808 cowbell.
 
 use crate::pitch_env::DahdEnv;
-use dsp_core::Filter;
+use synth_core::Filter;
 
 pub struct CowbellVoice {
     sr: f32,

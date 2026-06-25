@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 # Drum voices + sequencer. Depends only on the shared DSP primitives; no plugin
-# or host types, so it tests in milliseconds like dsp_core.
+# or host types, so it tests in milliseconds.
 [dependencies]
-dsp_core = { path = "../dsp_core" }
+# The shared, dependency-free family DSP core (oscillators, filters, envelopes,
+# drive, reverb, dynamics, mod-matrix, denormal util), shared with Esker. Pinned
+# to a rev so builds are reproducible; bump the rev to pull upstream fixes.
+synth_core = { git = "ssh://git@github.com/joeshipley/synth_core.git", rev = "eba0e714b8e7048c462976d61516f54b19b9375e" }

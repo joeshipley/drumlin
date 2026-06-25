@@ -5,7 +5,7 @@
 //! (M4/M7). Each channel has independent filter/drive state so a stereo voice
 //! (the clap) keeps its width.
 
-use dsp_core::{Drive, DriveKind, Filter};
+use synth_core::{Drive, DriveKind, Filter};
 
 pub struct VoiceTail {
     sr: f32,

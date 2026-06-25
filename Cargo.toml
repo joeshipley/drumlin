@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dsp_core", "crates/percussion_core", "crates/drumlin", "xtask"]
+members = ["crates/percussion_core", "crates/drumlin", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]

@@ -3,7 +3,7 @@
 //! 909-leaning (design §3.6/§3.7).
 
 use crate::pitch_env::DahdEnv;
-use dsp_core::{Drive, DriveKind, Noise, NoiseType, Oscillator, Waveform};
+use synth_core::{Drive, DriveKind, Noise, NoiseType, Oscillator, Waveform};
 
 pub struct KickVoice {
     sr: f32,

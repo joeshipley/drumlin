@@ -7,7 +7,7 @@
 //! Mono output, `Copy`, allocation-free; the recursive burst/tail envelopes are
 //! `flush_denormal`d.
 
-use dsp_core::{flush_denormal, Noise, NoiseType};
+use synth_core::{flush_denormal, Noise, NoiseType};
 
 /// Number of stacked attack bursts.
 const N_BURSTS: usize = 3;

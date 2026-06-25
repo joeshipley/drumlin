@@ -3,7 +3,7 @@
 //! fast exponential pitch sweep: pitched zaps, lasers, synthy accents.
 
 use crate::pitch_env::DahdEnv;
-use dsp_core::{Oscillator, Waveform};
+use synth_core::{Oscillator, Waveform};
 
 pub struct ZapVoice {
     sr: f32,

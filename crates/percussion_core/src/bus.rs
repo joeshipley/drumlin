@@ -1,10 +1,10 @@
 //! `DrumBus` — the kit's shared dynamics bus. "Glue is the headline" (design
 //! §5.3): the whole kit is compressed and limited as a unit so it hits like one
 //! instrument. M3 ships the SSL-style glue compressor → true-peak limiter, both
-//! `dsp_core::Dynamics` verbatim. Transient shaper, drive/bit-crush, parallel/NY
+//! `synth_core::Dynamics` verbatim. Transient shaper, drive/bit-crush, parallel/NY
 //! comp, sidechain PUMP, tape delay and reverb join at M7.
 
-use dsp_core::{Dynamics, LimiterStyle};
+use synth_core::{Dynamics, LimiterStyle};
 
 pub struct DrumBus {
     dynamics: Dynamics,
