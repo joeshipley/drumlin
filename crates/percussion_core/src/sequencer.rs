@@ -356,7 +356,8 @@ impl Sequencer {
     /// Current step index under the playhead (for the GUI moving column), or
     /// `None` when stopped.
     pub fn current_step(&self) -> Option<usize> {
-        if !self.playing {
+        if !self.playing || self.prev_floor < 0 {
+            // not playing, or playing but no boundary crossed yet this run
             return None;
         }
         let len = self.pattern.length.max(1) as i64;
@@ -651,11 +652,14 @@ impl Sequencer {
             self.pattern.swing as f32
         };
         // swing P (50..75): the off-16th of each pair is delayed by (P-50)/50 of
-        // a step (0 at 50, half a step at 75 = max).
+        // a step (0 at 50, half a step at 75 = max). Swing/groove follow the
+        // ABSOLUTE grid position, not the per-track (polymeter) step, so a swung
+        // groove doesn't "walk" on odd-length lanes.
+        let grid_pos = fl.rem_euclid(self.pattern.length.max(1) as i64) as usize;
         let swing_frac = (swing - 50.0).max(0.0) / 50.0;
-        let swing_off = if step_idx % 2 == 1 { swing_frac } else { 0.0 };
+        let swing_off = if grid_pos % 2 == 1 { swing_frac } else { 0.0 };
         let groove_off =
-            self.pattern.groove.offset_frac(step_idx) * (self.pattern.groove_amount as f32 / 100.0);
+            self.pattern.groove.offset_frac(grid_pos) * (self.pattern.groove_amount as f32 / 100.0);
         let mut off = (swing_off + groove_off) as f64 * samples_per_step;
         off += step.micro as f64 * samples_per_micro_tick;
         if self.pattern.humanize > 0 {
@@ -664,12 +668,14 @@ impl Sequencer {
         }
         let base_off = off.max(0.0); // M5 part 1 clamps early nudges to the boundary
 
-        // 5. ratchets
+        // 5. ratchets — spread the sub-hits over the space remaining between the
+        //    (swung) start and the next step boundary, so a roll can't spill past it.
         let ratchet = step.ratchet.clamp(1, 8);
         if ratchet <= 1 {
             self.schedule(i as f64 + base_off, block_len, t, vel, &step);
         } else {
-            let spacing = samples_per_step / ratchet as f64;
+            let span = (samples_per_step - base_off).max(samples_per_step * 0.25);
+            let spacing = span / ratchet as f64;
             for k in 0..ratchet {
                 let kv = ratchet_velocity(vel, k, ratchet, step.ratchet_ramp);
                 self.schedule(i as f64 + base_off + k as f64 * spacing, block_len, t, kv, &step);
@@ -692,7 +698,7 @@ impl Sequencer {
         } else {
             debug_assert!(
                 self.carry_len < self.carry.len(),
-                "sequencer carry overflow — block too large; sub-block chunking lands in M5 part 2"
+                "sequencer carry overflow — block too large; sub-block chunking is a later refinement"
             );
             if self.carry_len < self.carry.len() {
                 self.carry[self.carry_len] = Carried { samples: off - block_len as u32, trig };
@@ -704,7 +710,7 @@ impl Sequencer {
     fn push_pending(&mut self, trig: Trigger) {
         debug_assert!(
             self.pending_len < self.pending.len(),
-            "sequencer pending overflow — block too large; sub-block chunking lands in M5 part 2"
+            "sequencer pending overflow — block too large; sub-block chunking is a later refinement"
         );
         if self.pending_len < self.pending.len() {
             self.pending[self.pending_len] = trig;

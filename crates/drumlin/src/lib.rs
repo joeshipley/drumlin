@@ -170,13 +170,27 @@ fn grid_json() -> serde_json::Value {
             (0..len)
                 .map(|s| {
                     let st = &p.tracks[t].steps[s];
+                    let (cond, ra, rb) = match st.condition {
+                        TrigCondition::Ratio { a, b } => (5u8, a, b),
+                        other => (other.code(), 1u8, 2u8),
+                    };
+                    let plocks: Vec<serde_json::Value> = st
+                        .plocks()
+                        .iter()
+                        .map(|pl| json!({ "param": pl.param, "value": pl.value }))
+                        .collect();
                     json!({
                         "on": st.on,
                         "vel": st.velocity,
+                        "accent": st.accent,
                         "prob": st.probability,
                         "rat": st.ratchet,
-                        "cond": st.condition.code(),
-                        "plk": st.plock_count,
+                        "ramp": st.ratchet_ramp,
+                        "micro": st.micro,
+                        "cond": cond,
+                        "ra": ra,
+                        "rb": rb,
+                        "plocks": plocks,
                     })
                 })
                 .collect()

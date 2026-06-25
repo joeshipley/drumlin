@@ -65,34 +65,25 @@ The design doc commits to most of these; here are the frozen answers we build ag
 │  ├─ Cargo.toml               nih_plug_xtask (git)
 │  └─ src/main.rs              delegates to nih_plug_xtask::main()
 └─ crates/
-   ├─ dsp_core/               NEW — zero-dependency shared primitives (copied from Esker)
-   │  ├─ Cargo.toml            no dependencies
-   │  └─ src/
-   │     ├─ lib.rs             module decls + re-exports (DSP subset only)
-   │     ├─ filter.rs drive.rs delay.rs reverb.rs dynamics.rs
-   │     ├─ phaser.rs chorus.rs lfo.rs envelope.rs mod_matrix.rs
-   │     ├─ oscillator.rs wavetable.rs util.rs
-   │     └─ transient.rs       NEW (M3/M7) — bus transient shaper
-   ├─ percussion_core/        NEW — drum voices + sequencer + kit model (zero-dep)
-   │  ├─ Cargo.toml            depends only on dsp_core
-   │  └─ src/
-   │     ├─ lib.rs
-   │     ├─ pitch_env.rs resonator.rs metal_cluster.rs one_shot.rs clap_diffuser.rs
-   │     ├─ voice/{kick,snare,hat,tom,cymbal,fm_perc,noise}.rs
-   │     ├─ kit.rs             12 voices + bus assembly + choke groups
-   │     ├─ sequencer.rs       steps, p-locks, probability, ratchet, euclid, swing, song
-   │     ├─ bus.rs             drum-bus FX chain (re-points dsp_core modules)
-   │     ├─ transient_bank.rs  baked click/tick one-shots
-   │     └─ golden/            golden one-shots + default-pattern render fixtures
-   └─ drumlin/                NEW — nih-plug plugin shell (sibling of customvst)
+   │  (the shared DSP core is the EXTERNAL `synth_core` crate — a pinned git rev,
+   │   not a local crate; see §0. percussion_core depends on it directly.)
+   ├─ percussion_core/        drum voices + sequencer + kit model (zero-dep + synth_core)
+   │  ├─ Cargo.toml            depends on synth_core (git rev)
+   │  └─ src/                  (✅ = built)
+   │     ├─ lib.rs  rng.rs  plock.rs                                 ✅
+   │     ├─ pitch_env.rs resonator.rs metal_cluster.rs clap_diffuser.rs ✅
+   │     ├─ voice/{kick,snare,hat,clap,tom,rim,cowbell,zap}.rs       ✅
+   │     ├─ kit.rs  tail.rs  bus.rs                                  ✅
+   │     ├─ sequencer.rs       steps, p-locks, probability, ratchet, euclid, swing, bank ✅
+   │     ├─ one_shot.rs  transient_bank.rs                           (Later — sample/transient layer)
+   │     └─ golden/            golden one-shots + default-pattern render fixtures ✅
+   └─ drumlin/                nih-plug plugin shell (sibling of customvst)
       ├─ Cargo.toml            crate-type ["cdylib","lib"]; nih_plug + webview + rtrb + serde + directories
       └─ src/
-         ├─ lib.rs             Plugin impl, rings, viz, fx_reset, Action enum, editor()
-         ├─ main.rs            standalone entry (nih_export_standalone)
-         ├─ kits.rs            KITS (Scene/MacroDef reuse)
-         ├─ worlds.rs          GROOVE WORLDS (kit + pattern + groove + macros)
-         ├─ presets.rs         disk preset browser (directories crate)
-         └─ gui/index.html     PRISM, restyled for the step-sequencer
+         ├─ lib.rs             Plugin impl, rings, SeqEdit, Action enum, editor()  ✅
+         ├─ main.rs            standalone entry (nih_export_standalone)            ✅
+         ├─ gui/index.html     PRISM step-sequencer + inspector                   ✅
+         └─ kits.rs · worlds.rs · presets.rs   (M9 — not yet built)
 ```
 
 ### Pinned dependency facts (cloned from Esker so the family stays bit-compatible)

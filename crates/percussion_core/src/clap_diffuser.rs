@@ -56,6 +56,9 @@ impl ClapDiffuser {
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sr = sr.max(1.0);
         self.configure();
+        // The burst offsets are re-derived in new sample units; rebase the
+        // running counter so an in-flight one-shot can't mis-fire bursts.
+        self.reset();
     }
 
     fn configure(&mut self) {

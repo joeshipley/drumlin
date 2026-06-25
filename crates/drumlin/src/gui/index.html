@@ -122,7 +122,7 @@
     <div class="footer">
       <div class="pads" id="pads"></div>
       <div class="note">
-        <div><b>Click</b> a cell to toggle · select to edit it on the right · <b>shift-click</b> a lane name for lane tools.</div>
+        <div><b>Click</b> a cell to toggle &amp; select it · edit it in the panel on the right · click a <b>lane name</b> for lane tools.</div>
         <div>Set probability, ratchets, conditions &amp; <b>p-locks</b> per step. Hold FILL for fill steps.</div>
       </div>
     </div>
@@ -143,7 +143,7 @@
   let playing = false, seqOn = true, fillHeld = false;
   let cellEls = [], ledEls = [], playCol = -1;
 
-  function blankStep() { return { on: false, vel: 105, prob: 100, rat: 1, cond: 0, ra: 1, rb: 2, micro: 0, accent: false, plk: {} }; }
+  function blankStep() { return { on: false, vel: 105, prob: 100, rat: 1, ramp: 0, cond: 0, ra: 1, rb: 2, micro: 0, accent: false, plk: {} }; }
   function blankPat() { return Array.from({length: N_TRACKS}, () => Array.from({length: 64}, blankStep)); }
 
   const gridEl = document.getElementById("grid");
@@ -199,13 +199,14 @@
   }
 
   function selectStep(t, s) {
+    const prev = sel;
     sel = { t, s }; selLane = null;
-    for (let tt = 0; tt < N_TRACKS; tt++) for (let ss = 0; ss < LENGTH; ss++) paint(tt, ss);
+    if (prev) paint(prev.t, prev.s); // un-outline the previously selected cell
+    paint(t, s);
     renderInsp();
   }
   function selectLane(t) {
-    if (event && event.shiftKey) { selLane = t; sel = null; renderInsp(); }
-    else { selLane = t; sel = null; renderInsp(); }
+    selLane = t; sel = null; renderInsp();
   }
 
   function sendParams(t, s) {
@@ -312,9 +313,12 @@
     }
   }
   function selectPattern(p) {
+    if (p === cur) return;
     send({ type: "select-pattern", idx: p });
-    if (!playing) { cur = p; refreshGridFromBank(); } // immediate when stopped (mirrors engine)
-    else { patEls[p].classList.add("queued"); }
+    // Don't optimistically switch `cur`: the engine echoes the authoritative
+    // current pattern in status (immediately when stopped, at the loop boundary
+    // when playing). Mark the click pending until that echo lands.
+    patEls.forEach((e, i) => e.classList.toggle("queued", i === p));
   }
   function refreshGridFromBank() {
     for (let t = 0; t < N_TRACKS; t++) for (let s = 0; s < LENGTH; s++) paint(t, s);
@@ -363,7 +367,11 @@
       bank = Array.from({length: N_PATTERNS}, blankPat);
       for (let t = 0; t < N_TRACKS; t++) for (let s = 0; s < LENGTH; s++) {
         const c = (msg.cells[t] || [])[s];
-        if (c) bank[0][t][s] = { on: !!c.on, vel: c.vel, prob: c.prob, rat: c.rat, cond: c.cond, ra: 1, rb: 2, micro: 0, accent: false, plk: {} };
+        if (c) {
+          const plk = {};
+          (c.plocks || []).forEach(p => { plk[p.param] = p.value; });
+          bank[0][t][s] = { on: !!c.on, vel: c.vel, accent: !!c.accent, prob: c.prob, rat: c.rat, ramp: c.ramp || 0, cond: c.cond, ra: c.ra || 1, rb: c.rb || 2, micro: c.micro || 0, plk };
+        }
       }
       swing = msg.swing; human = msg.humanize;
       swingEl.value = swing; swingV.textContent = swing; humanEl.value = human; humanV.textContent = human;
