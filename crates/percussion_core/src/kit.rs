@@ -49,6 +49,62 @@ impl Default for VoicePatch {
     }
 }
 
+/// One track's MIX-strip state: the two aux sends + mute/solo. Level/Pan are NOT
+/// here — they live in the VOICE patch (`base[]`), shared so the MIX fader/pan
+/// and the VOICE editor edit one source of truth. `Default` is fully neutral
+/// (no sends, unmuted, unsoloed), so importing a default mix is a no-op.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VoiceMixRow {
+    pub send_a: f32, // -> reverb send, 0..1
+    pub send_b: f32, // -> delay send, 0..1
+    pub mute: bool,
+    pub solo: bool,
+}
+
+/// Below this, a send snaps to exactly 0.0 so the persisted value, the bus
+/// engage gate, and the per-sample render tap all agree on "off" (no sub-
+/// threshold send that routes nothing yet reports as engaged).
+const SEND_FLOOR: f32 = 0.0001;
+
+impl VoiceMixRow {
+    /// Apply one MIX edit: `field` 0 = Send A, 1 = Send B, 2 = mute, 3 = solo
+    /// (bools as `> 0.5`). The single source of this mapping — shared by the
+    /// audio-thread kit update and the editor-thread persist write, so they
+    /// can't drift.
+    pub fn set(&mut self, field: u8, value: f32) {
+        match field {
+            0 => self.send_a = Self::snap_send(value),
+            1 => self.send_b = Self::snap_send(value),
+            2 => self.mute = value > 0.5,
+            3 => self.solo = value > 0.5,
+            _ => {}
+        }
+    }
+
+    fn snap_send(value: f32) -> f32 {
+        let v = value.clamp(0.0, 1.0);
+        if v > SEND_FLOOR {
+            v
+        } else {
+            0.0
+        }
+    }
+}
+
+/// The whole kit's MIX state, persisted with the project (mirrors `VoicePatch`).
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VoiceMix {
+    pub tracks: [VoiceMixRow; MAX_TRACKS],
+}
+
+impl Default for VoiceMix {
+    fn default() -> Self {
+        Self { tracks: [VoiceMixRow::default(); MAX_TRACKS] }
+    }
+}
+
 /// Default track layout (design §3.2): index -> role.
 /// 0 KICK · 1 KICK2 · 2 SNARE · 3 CLAP · 4 RIM · 5 CLHAT · 6 OPHAT ·
 /// 7 RIDE · 8 TOM_LO · 9 TOM_HI · 10 PERC · 11 SAMPLE
@@ -63,6 +119,10 @@ pub struct DrumKit {
     /// Whether a track's tail currently holds a p-lock override (so an unlocked
     /// hit knows to restore the base). Keeps unlocked playback byte-identical.
     tail_dirty: [bool; MAX_TRACKS],
+    /// Per-track MIX state (sends + mute/solo). Level/Pan stay in `base[]`.
+    mix: [VoiceMixRow; MAX_TRACKS],
+    /// Cached "is any track soloed?" so `render` needn't scan 12 tracks/sample.
+    any_solo: bool,
     bus: DrumBus,
     sr: f32,
 }
@@ -128,6 +188,8 @@ impl DrumKit {
             choke_group,
             base,
             tail_dirty: [false; MAX_TRACKS],
+            mix: [VoiceMixRow::default(); MAX_TRACKS],
+            any_solo: false,
             bus: DrumBus::neutral(sr),
             sr,
         }
@@ -289,18 +351,81 @@ impl DrumKit {
         p.normalize(eng)
     }
 
-    /// Sum all voices through their tails, then the glue/limiter bus, to a stereo
-    /// frame.
+    /// Recompute cached mix flags + tell the bus which sends are in use (so the
+    /// reverb/delay returns run + tail while any voice routes to them).
+    fn recompute_mix_flags(&mut self) {
+        self.any_solo = self.mix.iter().any(|m| m.solo);
+        // Sends are snapped to 0 below SEND_FLOOR, so `> 0.0` matches the gate.
+        let any_a = self.mix.iter().any(|m| m.send_a > 0.0);
+        let any_b = self.mix.iter().any(|m| m.send_b > 0.0);
+        self.bus.set_send_active(any_a, any_b);
+    }
+
+    /// Set a track's MIX-strip value. `field`: 0 = Send A, 1 = Send B, 2 = mute,
+    /// 3 = solo (bools as `> 0.5`). Sends/mute/solo, not Level/Pan (those are
+    /// VOICE patch params via `set_voice_param`).
+    pub fn set_voice_mix(&mut self, track: usize, field: u8, value: f32) {
+        if track >= MAX_TRACKS {
+            return;
+        }
+        self.mix[track].set(field, value);
+        self.recompute_mix_flags();
+    }
+
+    /// Read a track's MIX value (for seeding the GUI). Bools come back as 0/1.
+    pub fn voice_mix(&self, track: usize, field: u8) -> f32 {
+        if track >= MAX_TRACKS {
+            return 0.0;
+        }
+        let m = self.mix[track];
+        match field {
+            0 => m.send_a,
+            1 => m.send_b,
+            2 => f32::from(m.mute),
+            3 => f32::from(m.solo),
+            _ => 0.0,
+        }
+    }
+
+    /// Snapshot the kit's MIX state for persistence (alloc-free).
+    pub fn export_mix_into(&self, mix: &mut VoiceMix) {
+        mix.tracks = self.mix;
+    }
+
+    /// Adopt a persisted MIX state (host project load).
+    pub fn import_mix(&mut self, mix: &VoiceMix) {
+        self.mix = mix.tracks;
+        self.recompute_mix_flags();
+    }
+
+    /// Sum all voices through their tails (with mute/solo gain), accumulating the
+    /// post-fader **Send A** (reverb) and **Send B** (delay) sums, then run the
+    /// glue/limiter bus with those sends. At the default (gain 1.0, sends 0) this
+    /// is bit-identical to a bare voice sum into the bus.
     pub fn render(&mut self) -> (f32, f32) {
         let mut l = 0.0;
         let mut r = 0.0;
-        for (v, t) in self.voices.iter_mut().zip(self.tails.iter_mut()) {
+        let mut a_l = 0.0;
+        let mut a_r = 0.0;
+        let mut b_l = 0.0;
+        let mut b_r = 0.0;
+        for (i, (v, t)) in self.voices.iter_mut().zip(self.tails.iter_mut()).enumerate() {
             let (vl, vr) = v.render();
             let (tl, tr) = t.process(vl, vr);
+            // mute/solo (cheap branch-free-ish gate; default 1.0)
+            let m = self.mix[i];
+            let g = if m.mute || (self.any_solo && !m.solo) { 0.0 } else { 1.0 };
+            let tl = tl * g;
+            let tr = tr * g;
             l += tl;
             r += tr;
+            // post-fader/mute sends
+            a_l += tl * m.send_a;
+            a_r += tr * m.send_a;
+            b_l += tl * m.send_b;
+            b_r += tr * m.send_b;
         }
-        self.bus.process(l, r)
+        self.bus.process_with_sends(l, r, a_l, a_r, b_l, b_r)
     }
 
     /// Number of currently-sounding voices (for the GUI voice meter).
@@ -420,6 +545,72 @@ mod tests {
         k1.import_patch(&VoicePatch::default());
         let after: Vec<_> = (0..MAX_TRACKS).map(|t| k1.base[t]).map(|b| (b.level, b.pan, b.cutoff, b.resonance, b.drive_amt, b.drive_on)).collect();
         assert_eq!(before, after, "default-patch import must not move any base value");
+    }
+
+    #[test]
+    fn voice_mix_round_trips_and_default_import_is_a_no_op() {
+        // Default mix import changes nothing (the golden guard).
+        let mut k = DrumKit::neutral(48_000.0);
+        k.import_mix(&VoiceMix::default());
+        let mut exported = VoiceMix::default();
+        k.export_mix_into(&mut exported);
+        assert_eq!(exported, VoiceMix::default(), "default mix must round-trip to default");
+
+        // Set a send + mute, round-trip, confirm survival.
+        k.set_voice_mix(2, 0, 0.6); // snare Send A
+        k.set_voice_mix(5, 2, 1.0); // closed-hat mute
+        k.set_voice_mix(0, 3, 1.0); // kick solo
+        let mut m = VoiceMix::default();
+        k.export_mix_into(&mut m);
+        let mut k2 = DrumKit::neutral(48_000.0);
+        k2.import_mix(&m);
+        assert!((k2.voice_mix(2, 0) - 0.6).abs() < 1e-6, "send A survives");
+        assert_eq!(k2.voice_mix(5, 2), 1.0, "mute survives");
+        assert_eq!(k2.voice_mix(0, 3), 1.0, "solo survives");
+    }
+
+    #[test]
+    fn sub_threshold_send_snaps_to_zero() {
+        // Below SEND_FLOOR a send snaps to exactly 0 so the engage gate and the
+        // render tap agree (no sub-threshold send that routes nothing yet engages).
+        let mut k = DrumKit::neutral(48_000.0);
+        k.set_voice_mix(0, 0, 0.000_05);
+        assert_eq!(k.voice_mix(0, 0), 0.0, "a sub-threshold send must snap to exactly 0");
+        k.set_voice_mix(0, 0, 0.5);
+        assert!((k.voice_mix(0, 0) - 0.5).abs() < 1e-6, "a real send is kept");
+    }
+
+    #[test]
+    fn mute_and_solo_gate_the_mix() {
+        // Energy assertions use silence (unambiguous) rather than relative levels,
+        // since the bus glue/limiter compensates when one of two voices drops.
+        let render_energy = |setup: &dyn Fn(&mut DrumKit)| {
+            let mut k = DrumKit::neutral(48_000.0);
+            setup(&mut k);
+            k.trigger(0, 1.0, true, &[]); // kick
+            k.trigger(2, 1.0, true, &[]); // snare
+            let mut e = 0.0_f32;
+            for _ in 0..4_000 {
+                let (l, r) = k.render();
+                e += l.abs() + r.abs();
+            }
+            e
+        };
+        let normal = render_energy(&|_k| {});
+        assert!(normal > 0.1, "the kit sounds normally");
+        // Muting every track -> silence.
+        let all_muted = render_energy(&|k| {
+            for t in 0..MAX_TRACKS {
+                k.set_voice_mix(t, 2, 1.0);
+            }
+        });
+        assert!(all_muted < normal * 0.02, "muting all tracks must silence the kit, got {all_muted}");
+        // Soloing an untriggered track -> the triggered kick/snare are gated -> silence.
+        let solo_silent = render_energy(&|k| k.set_voice_mix(7, 3, 1.0));
+        assert!(solo_silent < normal * 0.02, "solo on a silent track must gate the rest, got {solo_silent}");
+        // Soloing the kick keeps it clearly audible.
+        let solo_kick = render_energy(&|k| k.set_voice_mix(0, 3, 1.0));
+        assert!(solo_kick > normal * 0.1, "the soloed kick stays audible, got {solo_kick}");
     }
 
     #[test]

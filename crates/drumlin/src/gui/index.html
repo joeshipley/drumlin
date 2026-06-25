@@ -71,6 +71,19 @@
   .voice-trk.on { color: var(--accent); border-color: rgba(224,163,62,0.5); background: rgba(224,163,62,0.12); }
   .voice-params { max-width: 480px; }
   .voice-hint { margin-top: 20px; max-width: 480px; font-size: 10px; color: var(--dim-3); line-height: 1.6; }
+  .mix-wrap { flex: 1; padding: 16px 22px; overflow: auto; }
+  .mix-head, .mix-strip { display: grid; grid-template-columns: 64px 1fr 1fr 1fr 1fr 64px; gap: 12px; align-items: center; }
+  .mix-head { font-family: var(--mono); font-size: 7.5px; letter-spacing: 1px; color: var(--dim-3); margin-bottom: 8px; }
+  .mix-head span { text-align: center; }
+  .mix-head .mix-name { text-align: left; }
+  .mix-strip { padding: 4px 0; border-top: 1px solid var(--border); }
+  .mix-strip input[type=range] { width: 100%; }
+  .mix-strip.gated > *:not(.mix-ms) { opacity: 0.38; } /* effectively muted/solo-gated */
+  .mix-name { font-family: var(--mono); font-size: 9px; letter-spacing: 0.5px; color: var(--dim); }
+  .mix-ms { display: flex; gap: 6px; justify-content: flex-end; }
+  .mix-btn { font-family: var(--mono); font-size: 9px; width: 22px; height: 20px; border-radius: 5px; border: 1px solid var(--border); background: var(--panel-2); color: var(--dim); cursor: default; }
+  .mix-btn.m.on { color: #1a1a1a; background: #d98c4a; border-color: #d98c4a; }
+  .mix-btn.s.on { color: #1a1a1a; background: var(--accent); border-color: var(--accent); }
   .insp { width: 232px; flex: 0 0 232px; background: var(--panel-2); border-left: 1px solid var(--border); padding: 11px 12px; overflow-y: auto; font-size: 11px; }
   .insp h4 { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; margin: 12px 0 7px; }
   .insp h4:first-child { margin-top: 0; }
@@ -124,7 +137,7 @@
       <div class="rail">
         <div class="rail-btn on" data-view="grid">GRID</div>
         <div class="rail-btn" data-view="voice">VOICE</div>
-        <div class="rail-btn">MIX</div>
+        <div class="rail-btn" data-view="mix">MIX</div>
         <div class="rail-btn">MOD</div>
         <div class="rail-btn">BUS FX</div>
         <div class="rail-btn">KITS</div>
@@ -136,6 +149,12 @@
         <div class="voice-tracks" id="voiceTracks"></div>
         <div class="voice-params" id="voiceParams"></div>
         <div class="voice-hint">Edits set each track's default; per-step <b>p-locks</b> still override per hit. Saved with the project.</div>
+      </div>
+      <div class="mix-wrap" id="mixView" style="display:none">
+        <div class="voice-h">MIX · faders, sends &amp; mute/solo</div>
+        <div class="mix-head"><span class="mix-name"></span><span>LEVEL</span><span>PAN</span><span title="reverb send">SEND A</span><span title="delay send">SEND B</span><span class="mix-ms">M&nbsp;&nbsp;S</span></div>
+        <div class="mix-strips" id="mixStrips"></div>
+        <div class="voice-hint">LEVEL/PAN are the same per-track defaults as the VOICE page. SEND A → reverb, SEND B → delay. Saved with the project.</div>
       </div>
     </div>
 
@@ -429,11 +448,53 @@
   }
   function buildVoice() { buildVoiceTracks(); buildVoiceParams(); }
 
-  // ---- rail panel switching (GRID + VOICE wired this milestone) ----
+  // ---- MIX page (faders, sends, mute/solo) ----
+  // mixVals[track] = [sendA, sendB, mute(0/1), solo(0/1)], seeded from msg.voicemix.
+  // LEVEL/PAN reuse voiceVals (shared source of truth with the VOICE page).
+  let mixVals = Array.from({length: N_TRACKS}, () => [0, 0, 0, 0]);
+  const mixStripsEl = document.getElementById("mixStrips");
+  function mixSlider(val, oninput) {
+    const r = document.createElement("input"); r.type = "range"; r.min = 0; r.max = 1000;
+    r.value = Math.round((val ?? 0) * 1000);
+    r.addEventListener("input", () => oninput(+r.value / 1000));
+    return r;
+  }
+  function mixToggle(cls, active, ontoggle) {
+    const b = document.createElement("button");
+    b.className = "mix-btn " + cls + (active ? " on" : "");
+    b.textContent = cls.toUpperCase();
+    b.addEventListener("click", () => { const on = !b.classList.contains("on"); b.classList.toggle("on", on); ontoggle(on); });
+    return b;
+  }
+  function buildMix() {
+    mixStripsEl.innerHTML = "";
+    const anySolo = mixVals.some(m => m[3] > 0.5);
+    LANES.forEach((nm, t) => {
+      const row = document.createElement("div"); row.className = "mix-strip";
+      // Effectively silenced = muted, or something else is soloed and this isn't.
+      const gated = mixVals[t][2] > 0.5 || (anySolo && !(mixVals[t][3] > 0.5));
+      if (gated) row.classList.add("gated");
+      const name = document.createElement("div"); name.className = "mix-name"; name.textContent = nm;
+      row.appendChild(name);
+      row.appendChild(mixSlider(voiceVals[t][0], v => { voiceVals[t][0] = v; send({ type: "set-voice-param", track: t, param: 0, value: v }); }));
+      row.appendChild(mixSlider(voiceVals[t][1], v => { voiceVals[t][1] = v; send({ type: "set-voice-param", track: t, param: 1, value: v }); }));
+      row.appendChild(mixSlider(mixVals[t][0], v => { mixVals[t][0] = v; send({ type: "set-voice-mix", track: t, field: 0, value: v }); }));
+      row.appendChild(mixSlider(mixVals[t][1], v => { mixVals[t][1] = v; send({ type: "set-voice-mix", track: t, field: 1, value: v }); }));
+      const ms = document.createElement("div"); ms.className = "mix-ms";
+      // Mute/solo change the effective-gate of other rows, so repaint the page.
+      ms.appendChild(mixToggle("m", mixVals[t][2] > 0.5, on => { mixVals[t][2] = on ? 1 : 0; send({ type: "set-voice-mix", track: t, field: 2, value: on ? 1 : 0 }); buildMix(); }));
+      ms.appendChild(mixToggle("s", mixVals[t][3] > 0.5, on => { mixVals[t][3] = on ? 1 : 0; send({ type: "set-voice-mix", track: t, field: 3, value: on ? 1 : 0 }); buildMix(); }));
+      row.appendChild(ms);
+      mixStripsEl.appendChild(row);
+    });
+  }
+
+  // ---- rail panel switching (GRID + VOICE + MIX wired) ----
   let curView = "grid";
   const gridWrapEl = document.querySelector(".grid-wrap");
   const inspWrapEl = document.getElementById("insp");
   const voiceViewEl = document.getElementById("voiceView");
+  const mixViewEl = document.getElementById("mixView");
   function setView(name) {
     curView = name;
     document.querySelectorAll(".rail-btn").forEach(b => b.classList.toggle("on", b.dataset.view === name));
@@ -441,7 +502,9 @@
     gridWrapEl.style.display = grid ? "" : "none";
     inspWrapEl.style.display = grid ? "" : "none";
     voiceViewEl.style.display = name === "voice" ? "" : "none";
+    mixViewEl.style.display = name === "mix" ? "" : "none";
     if (name === "voice") buildVoice();
+    if (name === "mix") buildMix();
   }
   document.querySelector(".rail").addEventListener("click", (e) => {
     const btn = e.target.closest(".rail-btn");
@@ -480,6 +543,8 @@
       // unconditionally so a panel opened before the seed lands repaints with
       // the real (non-uniform) per-track values, not the placeholder fallback.
       if (msg.voicepatch) { voiceVals = msg.voicepatch; buildVoice(); }
+      // Seed the MIX strips (sends + mute/solo).
+      if (msg.voicemix) { mixVals = msg.voicemix; buildMix(); }
     } else if (msg.type === "status") {
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";

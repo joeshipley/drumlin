@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, O
 use std::sync::{Arc, Mutex};
 
 use percussion_core::{
-    track_for_note, DrumKit, LockableParam, Pattern, SeqState, Sequencer, TrigCondition, VoicePatch,
-    MAX_STEPS, MAX_TRACKS,
+    track_for_note, DrumKit, LockableParam, Pattern, SeqState, Sequencer, TrigCondition, VoiceMix,
+    VoicePatch, MAX_STEPS, MAX_TRACKS,
 };
 
 const EDITOR_WIDTH: u32 = 1100;
@@ -50,6 +50,9 @@ enum SeqEdit {
     /// Per-voice patch default (VOICE editor): `param` indexes `LockableParam`,
     /// `value` is normalized 0..1.
     SetVoiceParam { track: u8, param: u16, value: f32 },
+    /// Per-voice MIX (channel-strip) value: `field` 0=Send A, 1=Send B, 2=mute,
+    /// 3=solo (bools as 0.0/1.0).
+    SetVoiceMix { track: u8, field: u8, value: f32 },
 }
 
 /// JS -> Rust messages from the webview.
@@ -69,6 +72,7 @@ enum Action {
     Swing { value: u8 },
     Humanize { value: u8 },
     SetVoiceParam { track: u8, param: u16, value: f32 },
+    SetVoiceMix { track: u8, field: u8, value: f32 },
     Transport { play: bool },
     SeqEnable { on: bool },
     // Automatable param gestures (id: 0=gain, 1=pump, 2=bus_drive).
@@ -123,11 +127,18 @@ struct PersistState {
     seq_enabled: bool,
     #[serde(default)]
     voices: VoicePatch,
+    #[serde(default)]
+    mix: VoiceMix,
 }
 
 impl Default for PersistState {
     fn default() -> Self {
-        Self { seq: SeqState::default(), seq_enabled: true, voices: VoicePatch::default() }
+        Self {
+            seq: SeqState::default(),
+            seq_enabled: true,
+            voices: VoicePatch::default(),
+            mix: VoiceMix::default(),
+        }
     }
 }
 
@@ -305,7 +316,7 @@ fn pattern_cells(p: &Pattern) -> Vec<serde_json::Value> {
 /// persisted/live state, so the grid and VOICE editor the user sees always match
 /// what the engine will play. The patch is emitted **normalized** (0..1, the
 /// slider encoding) even though it's stored in engine units.
-fn bank_json(seq: &SeqState, voices: &VoicePatch) -> serde_json::Value {
+fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json::Value {
     let patterns: Vec<serde_json::Value> = seq
         .patterns
         .iter()
@@ -326,12 +337,19 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch) -> serde_json::Value {
                 .collect()
         })
         .collect();
+    // 12 tracks x [sendA, sendB, mute(0/1), solo(0/1)] for the MIX strips.
+    let mix_rows: Vec<Vec<f32>> = mix
+        .tracks
+        .iter()
+        .map(|m| vec![m.send_a, m.send_b, f32::from(m.mute), f32::from(m.solo)])
+        .collect();
     json!({
         "type": "grid",
         "tracks": MAX_TRACKS,
         "current": seq.current,
         "patterns": patterns,
         "voicepatch": voice_rows,
+        "voicemix": mix_rows,
     })
 }
 
@@ -421,7 +439,7 @@ impl Plugin for Drumlin {
                         // exactly what the engine holds (incl. a restored project):
                         // the pattern bank AND the per-voice patch.
                         if let Ok(s) = params.state.lock() {
-                            ctx.send_json(bank_json(&s.seq, &s.voices));
+                            ctx.send_json(bank_json(&s.seq, &s.voices, &s.mix));
                         }
                     }
                     Action::Note { on, note } => {
@@ -463,6 +481,16 @@ impl Plugin for Drumlin {
                                 if (track as usize) < MAX_TRACKS && (param as usize) < LockableParam::COUNT {
                                     s.voices.tracks[track as usize][param as usize] = p.denormalize(value);
                                 }
+                            }
+                        }
+                    }
+                    Action::SetVoiceMix { track, field, value } => {
+                        // Apply to the live kit AND persist on the editor thread
+                        // (transport-independent), mirroring SetVoiceParam.
+                        push_edit!(SeqEdit::SetVoiceMix { track, field, value });
+                        if let Ok(mut s) = params.state.lock() {
+                            if let Some(row) = s.mix.tracks.get_mut(track as usize) {
+                                row.set(field, value); // same mapping as the live kit
                             }
                         }
                     }
@@ -530,6 +558,7 @@ impl Plugin for Drumlin {
                 self.persisted_seq_enabled = state.seq_enabled;
             }
             self.kit.import_patch(&state.voices);
+            self.kit.import_mix(&state.mix);
         }
         true
     }
@@ -561,6 +590,11 @@ impl Plugin for Drumlin {
                 // Apply to the live kit for sound; persistence is handled on the
                 // editor thread (see Action::SetVoiceParam), not from here.
                 self.kit.set_voice_param(track as usize, param as u16, value);
+                continue;
+            }
+            if let SeqEdit::SetVoiceMix { track, field, value } = ed {
+                // Same split: live kit here, persistence on the editor thread.
+                self.kit.set_voice_mix(track as usize, field, value);
                 continue;
             }
             self.seq_dirty = true;
@@ -595,7 +629,7 @@ impl Plugin for Drumlin {
                 SeqEdit::SelectPattern { idx } => self.seq.select_pattern(idx as usize),
                 SeqEdit::Swing { value } => self.seq.set_swing(value),
                 SeqEdit::Humanize { value } => self.seq.set_humanize(value),
-                SeqEdit::SetVoiceParam { .. } => {} // handled before the match
+                SeqEdit::SetVoiceParam { .. } | SeqEdit::SetVoiceMix { .. } => {} // handled before the match
             }
         }
 
@@ -773,12 +807,16 @@ mod tests {
         seq.select_pattern(0);
         seq.set_step(1, 2, true);
 
-        let mut persisted = PersistState { seq: SeqState::default(), seq_enabled: false, voices: VoicePatch::default() };
+        let mut persisted = PersistState::default();
+        persisted.seq_enabled = false;
         seq.export_into(&mut persisted.seq);
-        // ...and a per-voice patch edit: snare (track 2) cutoff dialed down.
+        // ...a per-voice patch edit (snare cutoff) AND a mix edit (snare Send A + mute).
         let mut kit = DrumKit::neutral(48_000.0);
         kit.set_voice_param(2, LockableParam::Cutoff.index(), 0.3);
+        kit.set_voice_mix(2, 0, 0.5); // snare reverb send
+        kit.set_voice_mix(3, 2, 1.0); // clap mute
         kit.export_patch_into(&mut persisted.voices);
+        kit.export_mix_into(&mut persisted.mix);
 
         let json = serde_json::to_string(&persisted).expect("serialize");
         let back: PersistState = serde_json::from_str(&json).expect("deserialize");
@@ -795,6 +833,7 @@ mod tests {
         // The voice patch survives the JSON round-trip (engine-unit, lossless).
         let mut rkit = DrumKit::neutral(48_000.0);
         rkit.import_patch(&back.voices);
+        rkit.import_mix(&back.mix);
         assert!(
             (rkit.voice_param(2, LockableParam::Cutoff.index()) - 0.3).abs() < 1e-4,
             "per-voice patch edit must survive persistence"
@@ -803,9 +842,11 @@ mod tests {
             (rkit.voice_param(0, LockableParam::Cutoff.index()) - kit.voice_param(0, LockableParam::Cutoff.index())).abs() < 1e-6,
             "untouched tracks keep their neutral patch"
         );
+        assert!((rkit.voice_mix(2, 0) - 0.5).abs() < 1e-6, "Send A must survive persistence");
+        assert_eq!(rkit.voice_mix(3, 2), 1.0, "mute must survive persistence");
 
-        // Old projects (no `voices` field) still load (serde default = Neutral).
+        // Old projects (no `voices`/`mix` fields) still load (serde default = Neutral).
         let legacy = r#"{"seq":{"patterns":[],"current":0},"seq_enabled":true}"#;
-        let _: PersistState = serde_json::from_str(legacy).expect("legacy state without voices must load");
+        let _: PersistState = serde_json::from_str(legacy).expect("legacy state without voices/mix must load");
     }
 }

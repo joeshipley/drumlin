@@ -70,8 +70,10 @@ pub struct DrumBus {
     drive: f32,
     transient_amt: f32, // PUNCH, 0..1 -> attack emphasis
     parallel_amt: f32,  // 0 = dry, 1 = full NY blend added under the bus
-    reverb_amt: f32,
-    delay_amt: f32,
+    reverb_amt: f32,    // SPACE: global send-to-all into the reverb return
+    delay_amt: f32,     // DELAY: global send-to-all into the delay return
+    send_a_active: bool, // any voice routes to the reverb send
+    send_b_active: bool, // any voice routes to the delay send
 }
 
 impl DrumBus {
@@ -96,6 +98,8 @@ impl DrumBus {
             parallel_amt: 0.0,
             reverb_amt: 0.0,
             delay_amt: 0.0,
+            send_a_active: false,
+            send_b_active: false,
         };
         bus.configure();
         bus
@@ -144,11 +148,22 @@ impl DrumBus {
             .set_params(on, DriveKind::Tube, self.drive, 0.5, 16.0, 1.0, 0.0, 1.0);
     }
 
+    /// Is the reverb send engaged (global SPACE knob up, or any voice sends to it)?
+    fn reverb_engaged(&self) -> bool {
+        self.reverb_amt > 0.001 || self.send_a_active
+    }
+
+    /// Is the delay send engaged?
+    fn delay_engaged(&self) -> bool {
+        self.delay_amt > 0.001 || self.send_b_active
+    }
+
     fn apply_reverb(&mut self) {
-        let on = self.reverb_amt > 0.001;
-        // a bright EMT-style plate sized for drums; send level is the macro.
+        // Reverb is a wet-only SEND return now (process_wet_send): on whenever
+        // engaged, fed a send sum upstream, return at unity. The per-voice Send A
+        // and the global SPACE amount scale the input, not this.
         self.reverb.set_params(
-            on,
+            self.reverb_engaged(),
             ReverbAlgo::Plate224,
             1.6,    // decay s
             0.5,    // size
@@ -160,26 +175,26 @@ impl DrumBus {
             1.0,    // width
             false,  // freeze
         );
-        self.reverb.set_send(self.reverb_amt, 1.0);
+        self.reverb.set_send(1.0, 1.0);
     }
 
     fn apply_delay(&mut self) {
-        let on = self.delay_amt > 0.001;
         self.delay.set_tempo(self.tempo);
         // 1/8 on the left, dotted-ish on the right for a wide tempo-synced echo.
         let eighth = (60.0 / self.tempo.max(1.0)) * 0.5;
+        // mix = 1.0 -> the delay returns pure wet (it's a send, not an insert).
         self.delay.set_params(
-            on,
+            self.delay_engaged(),
             DelayMode::Tape,
-            eighth,         // time L
-            eighth * 0.75,  // time R
-            0.35,           // feedback
-            0.2,            // crossfeed (ping-pong)
-            0.25,           // wow
-            0.35,           // age
-            180.0,          // hpf
-            6500.0,         // lpf
-            self.delay_amt, // mix
+            eighth,        // time L
+            eighth * 0.75, // time R
+            0.35,          // feedback
+            0.2,           // crossfeed (ping-pong)
+            0.25,          // wow
+            0.35,          // age
+            180.0,         // hpf
+            6500.0,        // lpf
+            1.0,           // mix (pure wet return)
         );
     }
 
@@ -233,6 +248,16 @@ impl DrumBus {
         self.apply_delay();
     }
 
+    /// Tell the bus whether any voice routes to the reverb (`a`) / delay (`b`)
+    /// send, so the returns run (and tail) whenever a send is in use — not just
+    /// when the global SPACE/DELAY knobs are up.
+    pub fn set_send_active(&mut self, a: bool, b: bool) {
+        self.send_a_active = a;
+        self.send_b_active = b;
+        self.apply_reverb();
+        self.apply_delay();
+    }
+
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sr = sr;
         self.transient_l = TransientShaper::new(sr);
@@ -247,23 +272,63 @@ impl DrumBus {
         self.configure();
     }
 
+    /// Process the dry kit sum with no sends (e.g. a bare bus / tests).
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
-        let l = self.transient_l.process(l); // PUNCH (bypass at 0)
-        let r = self.transient_r.process(r);
+        self.process_with_sends(l, r, 0.0, 0.0, 0.0, 0.0)
+    }
+
+    /// Process the dry kit sum plus the per-voice **send sums** (post-fader) for
+    /// the reverb (Send A) and delay (Send B). The dry chain (transient → drive
+    /// → comp/pump → parallel) is unchanged; the reverb/delay are now parallel
+    /// **wet returns** (not inserts), mixed in just before the limiter, which
+    /// stays strictly last. Each return also receives a global send scaled by the
+    /// SPACE/DELAY knobs (`reverb_amt`/`delay_amt`) tapped off the dry bus.
+    ///
+    /// At the default (all sends 0, SPACE/DELAY 0) both returns are skipped, so
+    /// the output is `limiter(parallel_out)` — bit-identical to the M7 dry path.
+    pub fn process_with_sends(
+        &mut self,
+        dry_l: f32,
+        dry_r: f32,
+        send_a_l: f32,
+        send_a_r: f32,
+        send_b_l: f32,
+        send_b_r: f32,
+    ) -> (f32, f32) {
+        // --- dry chain (unchanged from M7) ---
+        let l = self.transient_l.process(dry_l); // PUNCH (bypass at 0)
+        let r = self.transient_r.process(dry_r);
         let l = self.drive_l.process(l);
         let r = self.drive_r.process(r);
         let (l, r) = self.comp.process(l, r); // pump + glue
         // Parallel/NY comp: add the hard-squashed signal under the dry bus.
-        // Bypassed (exact dry) at amount 0; the limiter (last) holds the ceiling.
-        let (l, r) = if self.parallel_amt > 0.001 {
+        let (dl, dr) = if self.parallel_amt > 0.001 {
             let (pl, pr) = self.parallel.process(l, r);
             (l + pl * self.parallel_amt, r + pr * self.parallel_amt)
         } else {
             (l, r)
         };
-        let (l, r) = self.delay.process(l, r); // tape delay (bypass at 0)
-        let (l, r) = self.reverb.process_send(l, r); // plate reverb (dry at 0)
-        self.limiter.process(l, r) // true-peak limiter, last
+
+        let mut out_l = dl;
+        let mut out_r = dr;
+        // --- delay send return (Send B + global DELAY) ---
+        if self.delay_engaged() {
+            let in_l = send_b_l + dl * self.delay_amt;
+            let in_r = send_b_r + dr * self.delay_amt;
+            let (wet_l, wet_r) = self.delay.process(in_l, in_r); // mix=1 -> pure wet
+            out_l += wet_l;
+            out_r += wet_r;
+        }
+        // --- reverb send return (Send A + global SPACE) ---
+        if self.reverb_engaged() {
+            let in_l = send_a_l + dl * self.reverb_amt;
+            let in_r = send_a_r + dr * self.reverb_amt;
+            let (wet_l, wet_r) = self.reverb.process_wet_send(in_l, in_r);
+            out_l += wet_l;
+            out_r += wet_r;
+        }
+
+        self.limiter.process(out_l, out_r) // true-peak limiter, LAST
     }
 
     pub fn pump_envelope(&self) -> f32 {
@@ -414,6 +479,35 @@ mod tests {
             duck_count(1.0) > duck_count(0.5),
             "a 1/16 rate must duck more often than 1/4 over the same span"
         );
+    }
+
+    #[test]
+    fn per_voice_send_rings_without_the_global_knob() {
+        // A per-voice Send A (reverb) must engage the return and tail even with
+        // the global SPACE knob at 0 — and the dry path must stay clean.
+        let mut bus = DrumBus::neutral(48_000.0);
+        bus.set_send_active(true, false);
+        bus.process_with_sends(0.0, 0.0, 1.0, 1.0, 0.0, 0.0); // impulse into the send only
+        let mut tail = 0.0_f32;
+        for _ in 0..12_000 {
+            let (l, r) = bus.process_with_sends(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            tail += l.abs() + r.abs();
+        }
+        assert!(tail > 0.01, "per-voice reverb send must ring without the global SPACE knob");
+    }
+
+    #[test]
+    fn zero_sends_match_the_bare_process() {
+        // process_with_sends(x,y,0,0,0,0) is exactly process(x,y) — the dry path
+        // is untouched by the send architecture when nothing is routed.
+        let mut a = DrumBus::neutral(48_000.0);
+        let mut b = DrumBus::neutral(48_000.0);
+        for i in 0..4_000 {
+            let s = 0.4 * (i as f32 * 0.05).sin();
+            let pa = a.process(s, s);
+            let pb = b.process_with_sends(s, s, 0.0, 0.0, 0.0, 0.0);
+            assert_eq!(pa, pb, "zero-send path must equal the bare dry process");
+        }
     }
 
     #[test]
