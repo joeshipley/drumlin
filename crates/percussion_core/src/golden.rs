@@ -32,7 +32,7 @@ fn push_frame(bytes: &mut Vec<u8>, l: f32, r: f32) {
 /// from a freshly-built kit.
 fn render_voice_oneshot(track: usize) -> Vec<u8> {
     let mut kit = DrumKit::neutral(SR);
-    kit.trigger(track, 1.0, false);
+    kit.trigger(track, 1.0, false, &[]);
     let mut bytes = Vec::with_capacity(ONESHOT_SAMPLES * 8);
     for _ in 0..ONESHOT_SAMPLES {
         let (l, r) = kit.render();
@@ -60,7 +60,7 @@ fn render_pattern_oneshot() -> Vec<u8> {
         let mut ti = 0;
         for i in 0..n {
             while ti < trigs.len() && trigs[ti].offset as usize <= i {
-                kit.trigger(trigs[ti].track as usize, trigs[ti].velocity, trigs[ti].accent);
+                kit.trigger(trigs[ti].track as usize, trigs[ti].velocity, trigs[ti].accent, trigs[ti].plocks());
                 ti += 1;
             }
             let (l, r) = kit.render();

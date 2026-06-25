@@ -103,6 +103,49 @@ impl VoiceTail {
         self.apply();
     }
 
+    // --- granular getters/setters for per-step parameter locks (M5) ---
+    pub fn level(&self) -> f32 {
+        self.level
+    }
+    pub fn pan(&self) -> f32 {
+        self.pan
+    }
+    pub fn lp_cutoff(&self) -> f32 {
+        self.lp_hz
+    }
+    pub fn resonance(&self) -> f32 {
+        self.res
+    }
+    pub fn drive_amount(&self) -> f32 {
+        self.drive_amt
+    }
+    pub fn drive_on(&self) -> bool {
+        self.drive_on
+    }
+
+    pub fn set_lp_cutoff(&mut self, hz: f32) {
+        self.lp_hz = hz;
+        self.lp_l.set_cutoff(hz);
+        self.lp_r.set_cutoff(hz);
+    }
+
+    pub fn set_resonance(&mut self, res: f32) {
+        self.res = res;
+        self.hp_l.set_resonance(res);
+        self.hp_r.set_resonance(res);
+        self.lp_l.set_resonance(res);
+        self.lp_r.set_resonance(res);
+    }
+
+    pub fn set_drive_amount(&mut self, on: bool, amount: f32) {
+        self.drive_on = on;
+        self.drive_amt = amount;
+        self.drive_l
+            .set_params(on, self.drive_kind, amount, self.drive_tone, 16.0, 1.0, 0.0, 1.0);
+        self.drive_r
+            .set_params(on, self.drive_kind, amount, self.drive_tone, 16.0, 1.0, 0.0, 1.0);
+    }
+
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
         let mut l = l;
         let mut r = r;

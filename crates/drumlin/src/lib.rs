@@ -298,7 +298,7 @@ impl Plugin for Drumlin {
             let on = ev & 0x100 != 0;
             if on {
                 if let Some(t) = track_for_note(note) {
-                    self.kit.trigger(t, PAD_VELOCITY, false);
+                    self.kit.trigger(t, PAD_VELOCITY, false, &[]);
                 }
             }
         }
@@ -358,7 +358,7 @@ impl Plugin for Drumlin {
                 }
                 if let NoteEvent::NoteOn { note, velocity, .. } = event {
                     if let Some(t) = track_for_note(note) {
-                        self.kit.trigger(t, velocity, false);
+                        self.kit.trigger(t, velocity, false, &[]);
                     }
                 }
                 next_midi = context.next_event();
@@ -371,7 +371,7 @@ impl Plugin for Drumlin {
                 if trg.offset as usize > i {
                     break;
                 }
-                self.kit.trigger(trg.track as usize, trg.velocity, trg.accent);
+                self.kit.trigger(trg.track as usize, trg.velocity, trg.accent, trg.plocks());
                 ti += 1;
             }
 

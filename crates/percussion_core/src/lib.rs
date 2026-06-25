@@ -15,7 +15,9 @@ pub mod clap_diffuser;
 pub mod kit;
 pub mod metal_cluster;
 pub mod pitch_env;
+pub mod plock;
 pub mod resonator;
+pub mod rng;
 pub mod sequencer;
 pub mod tail;
 pub mod voice;
@@ -28,8 +30,10 @@ pub use clap_diffuser::ClapDiffuser;
 pub use kit::{track_for_note, DrumKit};
 pub use metal_cluster::MetalCluster;
 pub use pitch_env::DahdEnv;
+pub use plock::{LockableParam, PLock, LOCKABLE_PARAMS, MAX_PLOCKS};
 pub use resonator::Resonator;
-pub use sequencer::{Pattern, Sequencer, Step, Track};
+pub use rng::XorShift32;
+pub use sequencer::{GrooveTemplate, Pattern, Sequencer, Step, Track, TrigCondition};
 pub use tail::VoiceTail;
 pub use voice::Voice;
 
@@ -50,7 +54,17 @@ pub const PPQN: u32 = 384;
 pub struct Trigger {
     pub offset: u32,
     pub track: u8,
-    /// 0.0..=1.0 (already includes step velocity × track level later layers).
+    /// 0.0..=1.0 (already includes step velocity × track level × humanize).
     pub velocity: f32,
     pub accent: bool,
+    /// Per-step parameter locks applied to this hit only.
+    pub plocks: [plock::PLock; plock::MAX_PLOCKS],
+    pub plock_count: u8,
+}
+
+impl Trigger {
+    /// The active p-locks for this hit.
+    pub fn plocks(&self) -> &[plock::PLock] {
+        &self.plocks[..(self.plock_count as usize).min(plock::MAX_PLOCKS)]
+    }
 }

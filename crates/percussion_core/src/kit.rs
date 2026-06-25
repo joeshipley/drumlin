@@ -6,11 +6,24 @@
 //! are `Silent` until M4.
 
 use crate::bus::DrumBus;
+use crate::plock::{LockableParam, PLock};
 use crate::tail::VoiceTail;
 use crate::voice::{
     ClapVoice, CowbellVoice, HatVoice, KickVoice, RimVoice, SnareVoice, TomVoice, Voice, ZapVoice,
 };
 use crate::MAX_TRACKS;
+
+/// A track's default (patch) values for the lockable tail params. A p-lock
+/// overrides one of these for a single hit; the next unlocked hit restores them.
+#[derive(Clone, Copy)]
+struct TrackBase {
+    level: f32,
+    pan: f32,
+    cutoff: f32,
+    resonance: f32,
+    drive_amt: f32,
+    drive_on: bool,
+}
 
 /// Default track layout (design §3.2): index -> role.
 /// 0 KICK · 1 KICK2 · 2 SNARE · 3 CLAP · 4 RIM · 5 CLHAT · 6 OPHAT ·
@@ -21,6 +34,11 @@ pub struct DrumKit {
     /// 0 = no group; 1..=4 = groups A..D. A trigger chokes other sounding
     /// voices sharing its group.
     choke_group: [u8; MAX_TRACKS],
+    /// Per-track default tail params (the p-lock restore target).
+    base: [TrackBase; MAX_TRACKS],
+    /// Whether a track's tail currently holds a p-lock override (so an unlocked
+    /// hit knows to restore the base). Keeps unlocked playback byte-identical.
+    tail_dirty: [bool; MAX_TRACKS],
     bus: DrumBus,
     sr: f32,
 }
@@ -70,7 +88,25 @@ impl DrumKit {
         choke_group[5] = 1; // closed hat -> group A
         choke_group[6] = 1; // open hat   -> group A (closed chokes open)
 
-        Self { voices, tails, choke_group, bus: DrumBus::neutral(sr), sr }
+        // Capture each track's configured tail values as the p-lock restore base.
+        let base: [TrackBase; MAX_TRACKS] = core::array::from_fn(|t| TrackBase {
+            level: tails[t].level(),
+            pan: tails[t].pan(),
+            cutoff: tails[t].lp_cutoff(),
+            resonance: tails[t].resonance(),
+            drive_amt: tails[t].drive_amount(),
+            drive_on: tails[t].drive_on(),
+        });
+
+        Self {
+            voices,
+            tails,
+            choke_group,
+            base,
+            tail_dirty: [false; MAX_TRACKS],
+            bus: DrumBus::neutral(sr),
+            sr,
+        }
     }
 
     pub fn sample_rate(&self) -> f32 {
@@ -88,12 +124,13 @@ impl DrumKit {
         self.bus.set_sample_rate(sr);
     }
 
-    /// Trigger a track. Applies the choke broadcast (allocation-free, O(12)),
-    /// then triggers the voice.
-    pub fn trigger(&mut self, track: usize, velocity: f32, accent: bool) {
+    /// Trigger a track. Applies any per-step parameter locks to the tail, the
+    /// choke broadcast (allocation-free, O(12)), then triggers the voice.
+    pub fn trigger(&mut self, track: usize, velocity: f32, accent: bool, plocks: &[PLock]) {
         if track >= MAX_TRACKS {
             return;
         }
+        self.apply_plocks(track, plocks);
         let g = self.choke_group[track];
         if g != 0 {
             for i in 0..MAX_TRACKS {
@@ -103,6 +140,44 @@ impl DrumKit {
             }
         }
         self.voices[track].trigger(velocity, accent);
+    }
+
+    /// Resolve (base + p-lock overrides) onto the track's tail. The dirty flag
+    /// lets an unlocked hit on an unlocked tail skip all work — so default
+    /// (no-p-lock) playback never touches the tail and stays bit-identical.
+    fn apply_plocks(&mut self, track: usize, plocks: &[PLock]) {
+        if plocks.is_empty() && !self.tail_dirty[track] {
+            return;
+        }
+        let b = self.base[track];
+        let mut level = b.level;
+        let mut pan = b.pan;
+        let mut cutoff = b.cutoff;
+        let mut resonance = b.resonance;
+        let mut drive_amt = b.drive_amt;
+        let mut drive_on = b.drive_on;
+        for pl in plocks {
+            if let Some(param) = LockableParam::from_index(pl.param) {
+                let v = param.denormalize(pl.value);
+                match param {
+                    LockableParam::Level => level = v,
+                    LockableParam::Pan => pan = v,
+                    LockableParam::Cutoff => cutoff = v,
+                    LockableParam::Resonance => resonance = v,
+                    LockableParam::Drive => {
+                        drive_amt = v;
+                        drive_on = v > 0.001;
+                    }
+                }
+            }
+        }
+        let tail = &mut self.tails[track];
+        tail.set_level(level);
+        tail.set_pan(pan);
+        tail.set_lp_cutoff(cutoff);
+        tail.set_resonance(resonance);
+        tail.set_drive_amount(drive_on, drive_amt);
+        self.tail_dirty[track] = !plocks.is_empty();
     }
 
     /// Sum all voices through their tails, then the glue/limiter bus, to a stereo
@@ -194,7 +269,7 @@ mod tests {
     #[test]
     fn triggering_a_voice_produces_sound() {
         let mut kit = DrumKit::neutral(48_000.0);
-        kit.trigger(0, 1.0, true); // kick
+        kit.trigger(0, 1.0, true, &[]); // kick
         let mut peak = 0.0_f32;
         for _ in 0..4_000 {
             let (l, _) = kit.render();
@@ -208,12 +283,12 @@ mod tests {
     fn closed_hat_chokes_open_hat() {
         let tail_len = |choke: bool| {
             let mut kit = DrumKit::neutral(48_000.0);
-            kit.trigger(6, 1.0, false); // open hat
+            kit.trigger(6, 1.0, false, &[]); // open hat
             for _ in 0..256 {
                 kit.render();
             }
             if choke {
-                kit.trigger(5, 1.0, false); // closed hat chokes open
+                kit.trigger(5, 1.0, false, &[]); // closed hat chokes open
             }
             let mut n = 0;
             while kit.track_active(6) {
@@ -237,7 +312,7 @@ mod tests {
     fn whole_kit_stays_finite_and_limited() {
         let mut kit = DrumKit::neutral(48_000.0);
         for t in [0usize, 2, 3, 5, 6] {
-            kit.trigger(t, 1.0, true);
+            kit.trigger(t, 1.0, true, &[]);
         }
         let mut peak = 0.0_f32;
         for _ in 0..48_000 {
@@ -247,5 +322,57 @@ mod tests {
         }
         // the true-peak limiter must keep the summed kit under ~0 dBFS
         assert!(peak <= 1.02, "bus limiter should hold the kit at ~0 dBFS, peak={peak}");
+    }
+
+    fn kick_peak(kit: &mut DrumKit) -> f32 {
+        let mut p = 0.0_f32;
+        for _ in 0..4_000 {
+            let (l, _) = kit.render();
+            p = p.max(l.abs());
+        }
+        p
+    }
+
+    #[test]
+    fn plock_changes_the_hit() {
+        // A Level lock at 0.0 (normalized) silences the hit vs an unlocked hit.
+        let mut unlocked = DrumKit::neutral(48_000.0);
+        unlocked.trigger(0, 1.0, false, &[]);
+        let unlocked_peak = kick_peak(&mut unlocked);
+
+        let mut locked = DrumKit::neutral(48_000.0);
+        locked.trigger(0, 1.0, false, &[PLock { param: LockableParam::Level.index(), value: 0.0 }]);
+        let locked_peak = kick_peak(&mut locked);
+
+        assert!(unlocked_peak > 0.2, "unlocked kick should be audible");
+        assert!(
+            locked_peak < unlocked_peak * 0.2,
+            "a Level=0 p-lock should silence the hit: locked={locked_peak} unlocked={unlocked_peak}"
+        );
+    }
+
+    #[test]
+    fn plock_restores_base_on_next_unlocked_hit() {
+        // hit 2 (unlocked) must come out the same whether hit 1 was p-locked or
+        // not — i.e. the dirty-flag restore puts the tail back to base. (Level
+        // scaling is post-filter, so hit 1 leaves the filter in the same state
+        // either way; the only variable under test is the restore.)
+        let second_hit_peak = |first_plocks: &[PLock]| {
+            let mut kit = DrumKit::neutral(48_000.0);
+            kit.trigger(0, 1.0, false, first_plocks);
+            for _ in 0..48_000 {
+                kit.render();
+            }
+            kit.trigger(0, 1.0, false, &[]); // hit 2: unlocked
+            kick_peak(&mut kit)
+        };
+        let after_locked =
+            second_hit_peak(&[PLock { param: LockableParam::Level.index(), value: 0.0 }]);
+        let after_unlocked = second_hit_peak(&[]);
+        assert!(
+            (after_locked - after_unlocked).abs() < after_unlocked * 0.02,
+            "unlocked hit must restore base regardless of the prior hit's p-lock: \
+             {after_locked} vs {after_unlocked}"
+        );
     }
 }
