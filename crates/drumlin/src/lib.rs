@@ -51,7 +51,7 @@ enum SeqEdit {
     /// `value` is normalized 0..1.
     SetVoiceParam { track: u8, param: u16, value: f32 },
     /// Per-voice MIX (channel-strip) value: `field` 0=Send A, 1=Send B, 2=mute,
-    /// 3=solo (bools as 0.0/1.0).
+    /// 3=solo, 4=gated_verb (bools as 0.0/1.0).
     SetVoiceMix { track: u8, field: u8, value: f32 },
 }
 
@@ -109,6 +109,9 @@ struct DrumlinParams {
     /// Transient PUNCH (attack emphasis) on the bus.
     #[id = "punch"]
     punch: FloatParam,
+    /// Gated-verb gate length (hold), ms.
+    #[id = "gate_time"]
+    gate_time: FloatParam,
 
     /// Out-of-band state the host can't reach through plain params: the full
     /// pattern bank (steps, p-locks, grooves) and the SEQ master-enable.
@@ -191,6 +194,9 @@ impl Default for DrumlinParams {
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
+            gate_time: FloatParam::new("Gate Time", 120.0, FloatRange::Linear { min: 20.0, max: 400.0 })
+                .with_unit(" ms")
+                .with_value_to_string(formatters::v2s_f32_rounded(0)),
             state: Arc::new(Mutex::new(PersistState::default())),
         }
     }
@@ -337,11 +343,19 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
                 .collect()
         })
         .collect();
-    // 12 tracks x [sendA, sendB, mute(0/1), solo(0/1)] for the MIX strips.
+    // 12 tracks x [sendA, sendB, mute, solo, gatedVerb] for the MIX strips.
     let mix_rows: Vec<Vec<f32>> = mix
         .tracks
         .iter()
-        .map(|m| vec![m.send_a, m.send_b, f32::from(m.mute), f32::from(m.solo)])
+        .map(|m| {
+            vec![
+                m.send_a,
+                m.send_b,
+                f32::from(m.mute),
+                f32::from(m.solo),
+                f32::from(m.gated_verb),
+            ]
+        })
         .collect();
     json!({
         "type": "grid",
@@ -416,6 +430,7 @@ impl Plugin for Drumlin {
                         6u8 => &params.pump_curve,
                         7u8 => &params.parallel,
                         8u8 => &params.punch,
+                        9u8 => &params.gate_time,
                         _ => &params.gain,
                     }
                 }};
@@ -677,6 +692,7 @@ impl Plugin for Drumlin {
         self.kit.set_pump_curve(self.params.pump_curve.value());
         self.kit.set_bus_parallel(self.params.parallel.value());
         self.kit.set_bus_transient(self.params.punch.value());
+        self.kit.set_gate_time(self.params.gate_time.value());
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);

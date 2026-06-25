@@ -5,7 +5,7 @@
 //! Snare, Clap and Closed/Open Hat at their design indices; the other 7 tracks
 //! are `Silent` until M4.
 
-use crate::bus::DrumBus;
+use crate::bus::{BusSends, DrumBus};
 use crate::plock::{LockableParam, PLock};
 use crate::tail::VoiceTail;
 use crate::voice::{
@@ -60,6 +60,10 @@ pub struct VoiceMixRow {
     pub send_b: f32, // -> delay send, 0..1
     pub mute: bool,
     pub solo: bool,
+    /// Route this voice's Send A to the GATED reverb (80s gated-verb) instead of
+    /// the normal reverb return.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub gated_verb: bool,
 }
 
 /// Below this, a send snaps to exactly 0.0 so the persisted value, the bus
@@ -68,16 +72,17 @@ pub struct VoiceMixRow {
 const SEND_FLOOR: f32 = 0.0001;
 
 impl VoiceMixRow {
-    /// Apply one MIX edit: `field` 0 = Send A, 1 = Send B, 2 = mute, 3 = solo
-    /// (bools as `> 0.5`). The single source of this mapping — shared by the
-    /// audio-thread kit update and the editor-thread persist write, so they
-    /// can't drift.
+    /// Apply one MIX edit: `field` 0 = Send A, 1 = Send B, 2 = mute, 3 = solo,
+    /// 4 = gated_verb (bools as `> 0.5`). The single source of this mapping —
+    /// shared by the audio-thread kit update and the editor-thread persist write,
+    /// so they can't drift.
     pub fn set(&mut self, field: u8, value: f32) {
         match field {
             0 => self.send_a = Self::snap_send(value),
             1 => self.send_b = Self::snap_send(value),
             2 => self.mute = value > 0.5,
             3 => self.solo = value > 0.5,
+            4 => self.gated_verb = value > 0.5,
             _ => {}
         }
     }
@@ -356,14 +361,16 @@ impl DrumKit {
     fn recompute_mix_flags(&mut self) {
         self.any_solo = self.mix.iter().any(|m| m.solo);
         // Sends are snapped to 0 below SEND_FLOOR, so `> 0.0` matches the gate.
-        let any_a = self.mix.iter().any(|m| m.send_a > 0.0);
+        // Send A splits by gated_verb: normal reverb vs the gated reverb return.
+        let any_a = self.mix.iter().any(|m| !m.gated_verb && m.send_a > 0.0);
+        let any_gated = self.mix.iter().any(|m| m.gated_verb && m.send_a > 0.0);
         let any_b = self.mix.iter().any(|m| m.send_b > 0.0);
-        self.bus.set_send_active(any_a, any_b);
+        self.bus.set_send_active(any_a, any_gated, any_b);
     }
 
     /// Set a track's MIX-strip value. `field`: 0 = Send A, 1 = Send B, 2 = mute,
-    /// 3 = solo (bools as `> 0.5`). Sends/mute/solo, not Level/Pan (those are
-    /// VOICE patch params via `set_voice_param`).
+    /// 3 = solo, 4 = gated_verb (bools as `> 0.5`). Sends/mute/solo/gated-verb,
+    /// not Level/Pan (those are VOICE patch params via `set_voice_param`).
     pub fn set_voice_mix(&mut self, track: usize, field: u8, value: f32) {
         if track >= MAX_TRACKS {
             return;
@@ -383,6 +390,7 @@ impl DrumKit {
             1 => m.send_b,
             2 => f32::from(m.mute),
             3 => f32::from(m.solo),
+            4 => f32::from(m.gated_verb),
             _ => 0.0,
         }
     }
@@ -405,27 +413,31 @@ impl DrumKit {
     pub fn render(&mut self) -> (f32, f32) {
         let mut l = 0.0;
         let mut r = 0.0;
-        let mut a_l = 0.0;
-        let mut a_r = 0.0;
-        let mut b_l = 0.0;
-        let mut b_r = 0.0;
+        let mut s = BusSends::default();
         for (i, (v, t)) in self.voices.iter_mut().zip(self.tails.iter_mut()).enumerate() {
             let (vl, vr) = v.render();
             let (tl, tr) = t.process(vl, vr);
-            // mute/solo (cheap branch-free-ish gate; default 1.0)
+            // mute/solo (cheap gate; default 1.0)
             let m = self.mix[i];
             let g = if m.mute || (self.any_solo && !m.solo) { 0.0 } else { 1.0 };
             let tl = tl * g;
             let tr = tr * g;
             l += tl;
             r += tr;
-            // post-fader/mute sends
-            a_l += tl * m.send_a;
-            a_r += tr * m.send_a;
-            b_l += tl * m.send_b;
-            b_r += tr * m.send_b;
+            // post-fader/mute sends. Send A routes to the gated reverb when the
+            // voice is flagged gated_verb, else the normal reverb.
+            let (sa_l, sa_r) = (tl * m.send_a, tr * m.send_a);
+            if m.gated_verb {
+                s.gated_l += sa_l;
+                s.gated_r += sa_r;
+            } else {
+                s.reverb_l += sa_l;
+                s.reverb_r += sa_r;
+            }
+            s.delay_l += tl * m.send_b;
+            s.delay_r += tr * m.send_b;
         }
-        self.bus.process_with_sends(l, r, a_l, a_r, b_l, b_r)
+        self.bus.process_with_sends(l, r, s)
     }
 
     /// Number of currently-sounding voices (for the GUI voice meter).
@@ -487,6 +499,11 @@ impl DrumKit {
     /// Transient PUNCH (attack emphasis), 0..1.
     pub fn set_bus_transient(&mut self, amount: f32) {
         self.bus.set_transient(amount);
+    }
+
+    /// Gated-verb gate length (hold), 20..400 ms.
+    pub fn set_gate_time(&mut self, ms: f32) {
+        self.bus.set_gate_time(ms);
     }
 
     /// Live pump duck gain (1.0 = open) for the GUI pump meter.

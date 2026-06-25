@@ -36,9 +36,21 @@
 //! Send A infrastructure and a new return-gate primitive.
 
 use synth_core::{
-    Delay, DelayMode, Drive, DriveKind, Dynamics, LimiterStyle, PumpSource, Reverb, ReverbAlgo,
-    TransientShaper,
+    Delay, DelayMode, Drive, DriveKind, Dynamics, Gate, LimiterStyle, PumpSource, Reverb,
+    ReverbAlgo, TransientShaper,
 };
+
+/// Post-fader per-voice send sums from the kit, feeding the bus returns. Split so
+/// gated-verb voices route to the *gated* reverb separately from the normal one.
+#[derive(Clone, Copy, Default)]
+pub struct BusSends {
+    pub reverb_l: f32, // Send A from non-gated voices -> normal reverb
+    pub reverb_r: f32,
+    pub gated_l: f32, // Send A from gated_verb voices -> gated reverb
+    pub gated_r: f32,
+    pub delay_l: f32, // Send B -> delay
+    pub delay_r: f32,
+}
 
 /// Pump **rate** divisions as quarter-note (beat) multiples: 1/1, 1/2, 1/4, 1/8,
 /// 1/16. The normalized macro quantizes into this table; the factory center
@@ -60,7 +72,9 @@ pub struct DrumBus {
     comp: Dynamics,     // pump + glue (limiter handled separately so FX sit before it)
     parallel: Dynamics, // NY/parallel comp, blended under the dry bus
     delay: Delay,
-    reverb: Reverb,
+    reverb: Reverb,         // normal Send A return (ungated tail)
+    reverb_gated: Reverb,   // gated Send A return (80s gated-verb)
+    gate: Gate,             // amp-gate on the gated reverb return
     limiter: Dynamics, // true-peak limiter, last in the chain
     sr: f32,
     tempo: f32,
@@ -72,7 +86,9 @@ pub struct DrumBus {
     parallel_amt: f32,  // 0 = dry, 1 = full NY blend added under the bus
     reverb_amt: f32,    // SPACE: global send-to-all into the reverb return
     delay_amt: f32,     // DELAY: global send-to-all into the delay return
-    send_a_active: bool, // any voice routes to the reverb send
+    gate_time: f32,      // gated-verb gate length, ms
+    send_a_active: bool, // any voice routes to the normal reverb send
+    gated_active: bool,  // any voice routes to the gated reverb send
     send_b_active: bool, // any voice routes to the delay send
 }
 
@@ -87,6 +103,8 @@ impl DrumBus {
             parallel: Dynamics::new(sr),
             delay: Delay::new(sr),
             reverb: Reverb::new(sr),
+            reverb_gated: Reverb::new(sr),
+            gate: Gate::new(sr),
             limiter: Dynamics::new(sr),
             sr,
             tempo: 120.0,
@@ -98,7 +116,9 @@ impl DrumBus {
             parallel_amt: 0.0,
             reverb_amt: 0.0,
             delay_amt: 0.0,
+            gate_time: 120.0,
             send_a_active: false,
+            gated_active: false,
             send_b_active: false,
         };
         bus.configure();
@@ -123,6 +143,8 @@ impl DrumBus {
         self.apply_drive();
         self.apply_transient();
         self.apply_reverb();
+        self.apply_gated_reverb();
+        self.apply_gate();
         self.apply_delay();
     }
 
@@ -176,6 +198,31 @@ impl DrumBus {
             false,  // freeze
         );
         self.reverb.set_send(1.0, 1.0);
+    }
+
+    fn apply_gated_reverb(&mut self) {
+        // A dense, bright plate for the gated burst — the Gate truncates the tail,
+        // so a medium decay is plenty. Fed only by gated_verb voices' Send A.
+        self.reverb_gated.set_params(
+            self.gated_active,
+            ReverbAlgo::Plate224,
+            1.2,     // decay s
+            0.6,     // size
+            0.0,     // predelay
+            0.3,     // damping (brighter)
+            120.0,   // locut
+            10_000.0, // hicut
+            0.15,    // modulation
+            1.0,     // width
+            false,   // freeze
+        );
+        self.reverb_gated.set_send(1.0, 1.0);
+    }
+
+    fn apply_gate(&mut self) {
+        // Fast amp-gate keyed by the gated send (the hit): snap open, hold for
+        // `gate_time`, slam shut — the 80s gated reverb.
+        self.gate.set_params(0.02, 1.0, self.gate_time, 40.0);
     }
 
     fn apply_delay(&mut self) {
@@ -248,14 +295,28 @@ impl DrumBus {
         self.apply_delay();
     }
 
-    /// Tell the bus whether any voice routes to the reverb (`a`) / delay (`b`)
-    /// send, so the returns run (and tail) whenever a send is in use — not just
-    /// when the global SPACE/DELAY knobs are up.
-    pub fn set_send_active(&mut self, a: bool, b: bool) {
+    /// Tell the bus which sends are in use — normal reverb (`a`), gated reverb
+    /// (`gated`), delay (`b`) — so each return runs (and tails) whenever a voice
+    /// routes to it, not only when the global SPACE/DELAY knobs are up.
+    pub fn set_send_active(&mut self, a: bool, gated: bool, b: bool) {
+        // On gated disengage, clear the gate + gated reverb so a later re-engage
+        // starts known-closed — no stale hold or frozen tail replayed.
+        if self.gated_active && !gated {
+            self.gate.reset();
+            self.reverb_gated.clear();
+        }
         self.send_a_active = a;
+        self.gated_active = gated;
         self.send_b_active = b;
         self.apply_reverb();
+        self.apply_gated_reverb();
         self.apply_delay();
+    }
+
+    /// Gated-verb gate length (hold), 20..400 ms.
+    pub fn set_gate_time(&mut self, ms: f32) {
+        self.gate_time = ms.clamp(20.0, 400.0);
+        self.apply_gate();
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
@@ -268,33 +329,29 @@ impl DrumBus {
         self.parallel = Dynamics::new(sr);
         self.delay = Delay::new(sr);
         self.reverb = Reverb::new(sr);
+        self.reverb_gated = Reverb::new(sr);
+        self.gate = Gate::new(sr);
         self.limiter = Dynamics::new(sr);
         self.configure();
     }
 
     /// Process the dry kit sum with no sends (e.g. a bare bus / tests).
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
-        self.process_with_sends(l, r, 0.0, 0.0, 0.0, 0.0)
+        self.process_with_sends(l, r, BusSends::default())
     }
 
-    /// Process the dry kit sum plus the per-voice **send sums** (post-fader) for
-    /// the reverb (Send A) and delay (Send B). The dry chain (transient → drive
-    /// → comp/pump → parallel) is unchanged; the reverb/delay are now parallel
-    /// **wet returns** (not inserts), mixed in just before the limiter, which
-    /// stays strictly last. Each return also receives a global send scaled by the
-    /// SPACE/DELAY knobs (`reverb_amt`/`delay_amt`) tapped off the dry bus.
+    /// Process the dry kit sum plus the per-voice **send sums** (post-fader). The
+    /// dry chain (transient → drive → comp/pump → parallel) is unchanged; the
+    /// reverb/delay are parallel **wet returns** (not inserts), mixed in just
+    /// before the limiter, which stays strictly last. The normal reverb + delay
+    /// also receive a global send scaled by the SPACE/DELAY knobs tapped off the
+    /// dry bus; the **gated** reverb is fed only by gated-verb voices and its
+    /// return is amp-gated (the 80s gated-verb).
     ///
-    /// At the default (all sends 0, SPACE/DELAY 0) both returns are skipped, so
-    /// the output is `limiter(parallel_out)` — bit-identical to the M7 dry path.
-    pub fn process_with_sends(
-        &mut self,
-        dry_l: f32,
-        dry_r: f32,
-        send_a_l: f32,
-        send_a_r: f32,
-        send_b_l: f32,
-        send_b_r: f32,
-    ) -> (f32, f32) {
+    /// At the default (all sends 0, SPACE/DELAY 0, no gated voices) every return
+    /// is skipped, so the output is `limiter(parallel_out)` — bit-identical to
+    /// the M7 dry path.
+    pub fn process_with_sends(&mut self, dry_l: f32, dry_r: f32, s: BusSends) -> (f32, f32) {
         // --- dry chain (unchanged from M7) ---
         let l = self.transient_l.process(dry_l); // PUNCH (bypass at 0)
         let r = self.transient_r.process(dry_r);
@@ -313,19 +370,28 @@ impl DrumBus {
         let mut out_r = dr;
         // --- delay send return (Send B + global DELAY) ---
         if self.delay_engaged() {
-            let in_l = send_b_l + dl * self.delay_amt;
-            let in_r = send_b_r + dr * self.delay_amt;
+            let in_l = s.delay_l + dl * self.delay_amt;
+            let in_r = s.delay_r + dr * self.delay_amt;
             let (wet_l, wet_r) = self.delay.process(in_l, in_r); // mix=1 -> pure wet
             out_l += wet_l;
             out_r += wet_r;
         }
-        // --- reverb send return (Send A + global SPACE) ---
+        // --- normal reverb send return (Send A + global SPACE) ---
         if self.reverb_engaged() {
-            let in_l = send_a_l + dl * self.reverb_amt;
-            let in_r = send_a_r + dr * self.reverb_amt;
+            let in_l = s.reverb_l + dl * self.reverb_amt;
+            let in_r = s.reverb_r + dr * self.reverb_amt;
             let (wet_l, wet_r) = self.reverb.process_wet_send(in_l, in_r);
             out_l += wet_l;
             out_r += wet_r;
+        }
+        // --- gated reverb return (gated-verb voices' Send A, gate on the return) ---
+        if self.gated_active {
+            let (wet_l, wet_r) = self.reverb_gated.process_wet_send(s.gated_l, s.gated_r);
+            // key the gate on the send (the hit) so it opens, holds, then slams.
+            let key = s.gated_l.abs().max(s.gated_r.abs());
+            let (gl, gr) = self.gate.process(wet_l, wet_r, key);
+            out_l += gl;
+            out_r += gr;
         }
 
         self.limiter.process(out_l, out_r) // true-peak limiter, LAST
@@ -486,26 +552,79 @@ mod tests {
         // A per-voice Send A (reverb) must engage the return and tail even with
         // the global SPACE knob at 0 — and the dry path must stay clean.
         let mut bus = DrumBus::neutral(48_000.0);
-        bus.set_send_active(true, false);
-        bus.process_with_sends(0.0, 0.0, 1.0, 1.0, 0.0, 0.0); // impulse into the send only
+        bus.set_send_active(true, false, false);
+        let imp = BusSends { reverb_l: 1.0, reverb_r: 1.0, ..Default::default() };
+        bus.process_with_sends(0.0, 0.0, imp); // impulse into the send only
         let mut tail = 0.0_f32;
         for _ in 0..12_000 {
-            let (l, r) = bus.process_with_sends(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            let (l, r) = bus.process_with_sends(0.0, 0.0, BusSends::default());
             tail += l.abs() + r.abs();
         }
         assert!(tail > 0.01, "per-voice reverb send must ring without the global SPACE knob");
     }
 
     #[test]
+    fn gated_reverb_burst_is_cut_short_by_the_gate() {
+        // The gated reverb return is silenced by the gate well before an ungated
+        // reverb of the same impulse would have decayed — the 80s gated-verb.
+        let tail_after_gate = |gated: bool| {
+            let mut bus = DrumBus::neutral(48_000.0);
+            bus.set_gate_time(80.0); // 80 ms gate
+            if gated {
+                bus.set_send_active(false, true, false);
+            } else {
+                bus.set_send_active(true, false, false);
+            }
+            let imp = if gated {
+                BusSends { gated_l: 1.0, gated_r: 1.0, ..Default::default() }
+            } else {
+                BusSends { reverb_l: 1.0, reverb_r: 1.0, ..Default::default() }
+            };
+            bus.process_with_sends(0.0, 0.0, imp);
+            // energy AFTER the gate would have shut (~200 ms in)
+            let mut late = 0.0_f32;
+            for i in 0..24_000 {
+                let (l, r) = bus.process_with_sends(0.0, 0.0, BusSends::default());
+                if i > 9_600 {
+                    late += l.abs() + r.abs();
+                }
+            }
+            late
+        };
+        assert!(
+            tail_after_gate(true) < tail_after_gate(false) * 0.25,
+            "the gate must cut the gated reverb tail well below the ungated one"
+        );
+    }
+
+    #[test]
+    fn gated_reverb_resets_clean_on_disengage() {
+        // Engage + hit (opens the hold), disengage mid-hold, re-engage: with no
+        // new key the gate must be closed — no stale hold/tail replayed.
+        let mut bus = DrumBus::neutral(48_000.0);
+        bus.set_gate_time(120.0);
+        bus.set_send_active(false, true, false);
+        bus.process_with_sends(0.0, 0.0, BusSends { gated_l: 1.0, gated_r: 1.0, ..Default::default() });
+        bus.set_send_active(false, false, false); // disengage mid-hold -> reset
+        bus.set_send_active(false, true, false); // re-engage
+        let mut e = 0.0_f32;
+        for _ in 0..2_000 {
+            let (l, r) = bus.process_with_sends(0.0, 0.0, BusSends::default());
+            e += l.abs() + r.abs();
+        }
+        assert!(e < 0.001, "re-engaged gated reverb must start closed, got {e}");
+    }
+
+    #[test]
     fn zero_sends_match_the_bare_process() {
-        // process_with_sends(x,y,0,0,0,0) is exactly process(x,y) — the dry path
+        // process_with_sends(x,y,default) is exactly process(x,y) — the dry path
         // is untouched by the send architecture when nothing is routed.
         let mut a = DrumBus::neutral(48_000.0);
         let mut b = DrumBus::neutral(48_000.0);
         for i in 0..4_000 {
             let s = 0.4 * (i as f32 * 0.05).sin();
             let pa = a.process(s, s);
-            let pb = b.process_with_sends(s, s, 0.0, 0.0, 0.0, 0.0);
+            let pb = b.process_with_sends(s, s, BusSends::default());
             assert_eq!(pa, pb, "zero-send path must equal the bare dry process");
         }
     }
