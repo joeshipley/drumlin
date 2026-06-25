@@ -3,34 +3,58 @@
 //! instrument.
 //!
 //! Signal flow (design §5.3 order, true-peak limiter LAST):
-//!   kit sum → bus drive → comp (sidechain PUMP → SSL glue) → tape/stereo DELAY
-//!            → plate REVERB send → true-peak limiter
+//!   kit sum → bus drive → comp (sidechain PUMP → SSL glue) → PARALLEL/NY comp
+//!            → tape/stereo DELAY → plate REVERB send → true-peak limiter
 //!
-//! - **PUMP** (M7) — `Dynamics::set_pump` (`IntKick`, beat-synced quarter-note
-//!   duck): the Daft-Punk/French-house breathe. `pump_envelope()` drives the GUI
-//!   duck meter.
+//! - **PUMP** (M7) — `Dynamics::set_pump` (`IntKick`, beat-synced duck): the
+//!   Daft-Punk/French-house breathe. `pump_envelope()` drives the GUI duck meter.
+//!   M7 pt3 exposes its **rate** (note division) and **curve** (duck shape).
 //! - **DRIVE** (M7) — lo-fi bus saturation.
+//! - **PARALLEL/NY comp** (M7 pt3) — a hard-squashed `Dynamics` added back under
+//!   the dry bus for density; the true-peak limiter (last) still holds the ceiling.
 //! - **DELAY + REVERB** (M7 pt2) — the "drive & space" the kit was missing; both
 //!   tempo-aware, and a true bypass (dry passthrough) at amount 0.
 //! - **glue + true-peak limiter** (M3).
 //!
-//! At the Neutral defaults (pump/drive/reverb/delay all 0) the chain is a pure
-//! passthrough into glue → limiter, so the golden anchors are unaffected.
-//! Transient shaper, parallel/NY comp and the snare gated-verb send join next.
+//! At the Neutral defaults (pump/drive/reverb/delay/parallel all 0, and pump
+//! rate/curve at their factory centers reproducing the original quarter-note,
+//! 0.5-curve duck) the chain is a pure passthrough into glue → limiter, so the
+//! golden anchors are unaffected.
+//!
+//! Still to come: a transient shaper (one new `synth_core` module) at the head
+//! of the chain, and — deferred to **M8** — the snare **gated-verb** send, which
+//! needs per-voice send routing (the snare tapped separately into the reverb,
+//! gated on its return) that does not exist while the kit sums into one bus.
 
 use synth_core::{Delay, DelayMode, Drive, DriveKind, Dynamics, LimiterStyle, PumpSource, Reverb, ReverbAlgo};
+
+/// Pump **rate** divisions as quarter-note (beat) multiples: 1/1, 1/2, 1/4, 1/8,
+/// 1/16. The normalized macro quantizes into this table; the factory center
+/// (0.5) selects 1/4 — the original hardcoded duck — so the pump sound is
+/// unchanged by default.
+const PUMP_RATE_BEATS: [f32; 5] = [4.0, 2.0, 1.0, 0.5, 0.25];
+
+fn pump_rate_beats(norm: f32) -> f32 {
+    let n = PUMP_RATE_BEATS.len();
+    let idx = ((norm.clamp(0.0, 1.0) * n as f32) as usize).min(n - 1);
+    PUMP_RATE_BEATS[idx]
+}
 
 pub struct DrumBus {
     drive_l: Drive,
     drive_r: Drive,
-    comp: Dynamics,    // pump + glue (limiter handled separately so FX sit before it)
+    comp: Dynamics,     // pump + glue (limiter handled separately so FX sit before it)
+    parallel: Dynamics, // NY/parallel comp, blended under the dry bus
     delay: Delay,
     reverb: Reverb,
     limiter: Dynamics, // true-peak limiter, last in the chain
     sr: f32,
     tempo: f32,
     pump: f32,
+    pump_rate: f32,  // normalized -> PUMP_RATE_BEATS division
+    pump_curve: f32, // duck shape, 0..1
     drive: f32,
+    parallel_amt: f32, // 0 = dry, 1 = full NY blend added under the bus
     reverb_amt: f32,
     delay_amt: f32,
 }
@@ -41,13 +65,17 @@ impl DrumBus {
             drive_l: Drive::new(sr),
             drive_r: Drive::new(sr),
             comp: Dynamics::new(sr),
+            parallel: Dynamics::new(sr),
             delay: Delay::new(sr),
             reverb: Reverb::new(sr),
             limiter: Dynamics::new(sr),
             sr,
             tempo: 120.0,
             pump: 0.0,
+            pump_rate: 0.5,  // 1/4 note — the original duck
+            pump_curve: 0.5, // the original duck shape
             drive: 0.0,
+            parallel_amt: 0.0,
             reverb_amt: 0.0,
             delay_amt: 0.0,
         };
@@ -60,6 +88,12 @@ impl DrumBus {
         self.comp.set_glue(true, -18.0, 2.0, 3.0, 1.0);
         self.comp.set_limiter(false, -0.3, 0.05, LimiterStyle::Transparent);
         self.comp.set_tempo(self.tempo);
+        // parallel/NY stage: hard squash, no pump, no limiter. Its OUTPUT is
+        // added under the dry bus (scaled by `parallel_amt`), so its makeup is
+        // baked in here and the blend amount is the macro.
+        self.parallel.set_glue(true, -30.0, 8.0, 6.0, 1.0);
+        self.parallel.set_pump(0.0, PumpSource::IntKick, 0.5, 0.5, 0.0);
+        self.parallel.set_limiter(false, -0.3, 0.05, LimiterStyle::Transparent);
         // final stage: true-peak limiter only.
         self.limiter.set_glue(false, -18.0, 2.0, 3.0, 1.0);
         self.limiter.set_limiter(true, -0.3, 0.05, LimiterStyle::Transparent);
@@ -70,9 +104,11 @@ impl DrumBus {
     }
 
     fn apply_pump(&mut self) {
-        let division = 60.0 / self.tempo.max(1.0); // quarter-note duck
+        // rate -> note division (factory center = 1/4); curve -> duck shape.
+        let beats = pump_rate_beats(self.pump_rate);
+        let division = (60.0 / self.tempo.max(1.0)) * beats;
         self.comp
-            .set_pump(self.pump, PumpSource::IntKick, division, 0.5, 0.0);
+            .set_pump(self.pump, PumpSource::IntKick, division, self.pump_curve, 0.0);
     }
 
     fn apply_drive(&mut self) {
@@ -134,6 +170,23 @@ impl DrumBus {
         self.apply_pump();
     }
 
+    /// Pump rate (normalized), quantized to a note division (1/1..1/16).
+    pub fn set_pump_rate(&mut self, norm: f32) {
+        self.pump_rate = norm.clamp(0.0, 1.0);
+        self.apply_pump();
+    }
+
+    /// Pump duck curve/shape, 0..1.
+    pub fn set_pump_curve(&mut self, curve: f32) {
+        self.pump_curve = curve.clamp(0.0, 1.0);
+        self.apply_pump();
+    }
+
+    /// Parallel/NY compression blend, 0..1 (0 = dry passthrough).
+    pub fn set_parallel(&mut self, amount: f32) {
+        self.parallel_amt = amount.clamp(0.0, 1.0);
+    }
+
     pub fn set_drive(&mut self, amount: f32) {
         self.drive = amount.clamp(0.0, 1.0);
         self.apply_drive();
@@ -154,6 +207,7 @@ impl DrumBus {
         self.drive_l = Drive::new(sr);
         self.drive_r = Drive::new(sr);
         self.comp = Dynamics::new(sr);
+        self.parallel = Dynamics::new(sr);
         self.delay = Delay::new(sr);
         self.reverb = Reverb::new(sr);
         self.limiter = Dynamics::new(sr);
@@ -164,6 +218,14 @@ impl DrumBus {
         let l = self.drive_l.process(l);
         let r = self.drive_r.process(r);
         let (l, r) = self.comp.process(l, r); // pump + glue
+        // Parallel/NY comp: add the hard-squashed signal under the dry bus.
+        // Bypassed (exact dry) at amount 0; the limiter (last) holds the ceiling.
+        let (l, r) = if self.parallel_amt > 0.001 {
+            let (pl, pr) = self.parallel.process(l, r);
+            (l + pl * self.parallel_amt, r + pr * self.parallel_amt)
+        } else {
+            (l, r)
+        };
         let (l, r) = self.delay.process(l, r); // tape delay (bypass at 0)
         let (l, r) = self.reverb.process_send(l, r); // plate reverb (dry at 0)
         self.limiter.process(l, r) // true-peak limiter, last
@@ -218,6 +280,80 @@ mod tests {
         }
         assert!(min_env < 0.8, "pump should duck the bus, min={min_env}");
         assert!(max_env > 0.95, "and recover between ducks, max={max_env}");
+    }
+
+    #[test]
+    fn parallel_comp_is_dry_at_zero_and_denser_when_engaged() {
+        // At amount 0 the bus output must be byte-identical to a bus that never
+        // had the parallel stage (exact-dry guard); engaging it adds energy.
+        let drive_sum = |amount: f32| {
+            let mut bus = DrumBus::neutral(48_000.0);
+            bus.set_parallel(amount);
+            let mut dry = DrumBus::neutral(48_000.0); // parallel stays 0
+            let mut diff = 0.0_f32;
+            let mut energy = 0.0_f32;
+            for i in 0..8_000 {
+                let s = 0.25 * (i as f32 * 0.03).sin();
+                let (l, _) = bus.process(s, s);
+                let (dl, _) = dry.process(s, s);
+                diff += (l - dl).abs();
+                energy += l.abs();
+            }
+            (diff, energy)
+        };
+        let (diff0, e0) = drive_sum(0.0);
+        assert_eq!(diff0, 0.0, "parallel at 0 must be exact dry passthrough");
+        let (_, e_on) = drive_sum(1.0);
+        assert!(e_on > e0 * 1.02, "engaging parallel comp should add density");
+    }
+
+    #[test]
+    fn parallel_comp_still_respects_the_limiter() {
+        let mut bus = DrumBus::neutral(48_000.0);
+        bus.set_parallel(1.0);
+        let mut peak = 0.0_f32;
+        for i in 0..8_000 {
+            let s = 3.0 * (i as f32 * 0.1).sin();
+            let (l, r) = bus.process(s, s);
+            if i > 1_000 {
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+        }
+        assert!(peak <= 1.02, "limiter must still hold the ceiling with parallel comp, peak={peak}");
+    }
+
+    #[test]
+    fn pump_rate_factory_center_reproduces_the_quarter_note_duck() {
+        // The factory center (0.5) must select the 1/4-note division so existing
+        // pump settings sound identical — verified via the rate table.
+        assert_eq!(pump_rate_beats(0.5), 1.0, "center rate is a quarter note");
+        assert_eq!(pump_rate_beats(0.0), 4.0, "min rate is 1/1");
+        assert_eq!(pump_rate_beats(1.0), 0.25, "max rate is 1/16");
+    }
+
+    #[test]
+    fn faster_pump_rate_ducks_more_often() {
+        let duck_count = |rate: f32| {
+            let mut bus = DrumBus::neutral(48_000.0);
+            bus.set_tempo(120.0);
+            bus.set_pump(0.9);
+            bus.set_pump_rate(rate);
+            let mut crossings = 0;
+            let mut prev = 1.0_f32;
+            for i in 0..96_000 {
+                bus.process(0.0, 0.0);
+                let e = bus.pump_envelope();
+                if prev >= 0.85 && e < 0.85 {
+                    crossings += 1;
+                }
+                prev = e;
+            }
+            crossings
+        };
+        assert!(
+            duck_count(1.0) > duck_count(0.5),
+            "a 1/16 rate must duck more often than 1/4 over the same span"
+        );
     }
 
     #[test]

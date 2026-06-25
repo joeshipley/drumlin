@@ -89,11 +89,11 @@
   .pads { display: grid; grid-template-columns: repeat(6, 42px); grid-template-rows: repeat(2, 26px); gap: 4px; }
   .pad { border-radius: 5px; background: var(--raise); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 7px; letter-spacing: 0.4px; color: var(--dim); cursor: pointer; text-align: center; }
   .pad.hit { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-  .busfx { display: flex; flex-direction: column; gap: 2px; padding: 0 12px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
-  .busfx-h { font-family: var(--mono); font-size: 7.5px; letter-spacing: 1.5px; color: var(--dim-3); margin-bottom: 2px; }
+  .busfx { display: grid; grid-template-columns: auto auto; gap: 2px 14px; align-content: center; padding: 0 12px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  .busfx-h { grid-column: 1 / -1; font-family: var(--mono); font-size: 7.5px; letter-spacing: 1.5px; color: var(--dim-3); margin-bottom: 2px; }
   .busfx-row { display: flex; align-items: center; gap: 6px; }
-  .busfx-row label { font-family: var(--mono); font-size: 8px; letter-spacing: 0.5px; color: var(--dim); width: 36px; }
-  .busfx-row input[type=range] { width: 70px; }
+  .busfx-row label { font-family: var(--mono); font-size: 8px; letter-spacing: 0.5px; color: var(--dim); width: 42px; }
+  .busfx-row input[type=range] { width: 60px; }
   .note { font-family: var(--mono); font-size: 9px; letter-spacing: 0.4px; color: var(--dim-3); line-height: 1.7; }
   .note b { color: var(--dim); font-weight: 600; }
 </style>
@@ -131,8 +131,11 @@
       <div class="busfx">
         <div class="busfx-h">BUS FX</div>
         <div class="busfx-row"><label>DRIVE</label><input type="range" id="drive" min="0" max="1000" value="0"></div>
+        <div class="busfx-row" title="Parallel / NY compression"><label>COMP</label><input type="range" id="parallel" min="0" max="1000" value="0"></div>
         <div class="busfx-row"><label>SPACE</label><input type="range" id="reverb" min="0" max="1000" value="0"></div>
+        <div class="busfx-row" title="Pump rate (note division)"><label>P·RATE</label><input type="range" id="pumprate" min="0" max="1000" value="500"></div>
         <div class="busfx-row"><label>DELAY</label><input type="range" id="delay" min="0" max="1000" value="0"></div>
+        <div class="busfx-row" title="Pump duck curve"><label>P·CURV</label><input type="range" id="pumpcurve" min="0" max="1000" value="500"></div>
       </div>
       <div class="note">
         <div><b>Click</b> a cell to toggle &amp; select it · edit it in the panel on the right · click a <b>lane name</b> for lane tools.</div>
@@ -365,6 +368,9 @@
   paramSlider(2, document.getElementById("drive"));
   paramSlider(3, document.getElementById("reverb"));
   paramSlider(4, document.getElementById("delay"));
+  paramSlider(5, document.getElementById("pumprate"));
+  paramSlider(6, document.getElementById("pumpcurve"));
+  paramSlider(7, document.getElementById("parallel"));
   const duckfill = document.getElementById("duckfill");
 
   // ---- pads ----

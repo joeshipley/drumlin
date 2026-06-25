@@ -235,6 +235,21 @@ impl DrumKit {
         self.bus.set_delay(amount);
     }
 
+    /// Pump rate (normalized -> note division).
+    pub fn set_pump_rate(&mut self, norm: f32) {
+        self.bus.set_pump_rate(norm);
+    }
+
+    /// Pump duck curve/shape, 0..1.
+    pub fn set_pump_curve(&mut self, curve: f32) {
+        self.bus.set_pump_curve(curve);
+    }
+
+    /// Parallel/NY compression blend, 0..1.
+    pub fn set_bus_parallel(&mut self, amount: f32) {
+        self.bus.set_parallel(amount);
+    }
+
     /// Live pump duck gain (1.0 = open) for the GUI pump meter.
     pub fn pump_envelope(&self) -> f32 {
         self.bus.pump_envelope()

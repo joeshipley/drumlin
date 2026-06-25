@@ -88,6 +88,15 @@ struct DrumlinParams {
     /// Tape/stereo delay mix.
     #[id = "delay"]
     delay: FloatParam,
+    /// Pump rate (note division); factory center reproduces the 1/4-note duck.
+    #[id = "pump_rate"]
+    pump_rate: FloatParam,
+    /// Pump duck curve/shape.
+    #[id = "pump_curve"]
+    pump_curve: FloatParam,
+    /// Parallel/NY compression blend.
+    #[id = "parallel"]
+    parallel: FloatParam,
 
     /// Out-of-band state the host can't reach through plain params: the full
     /// pattern bank (steps, p-locks, grooves) and the SEQ master-enable.
@@ -140,6 +149,19 @@ impl Default for DrumlinParams {
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
             delay: FloatParam::new("Delay", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            // Factory center 0.5 selects the 1/4-note division — the original duck.
+            pump_rate: FloatParam::new("Pump Rate", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(Arc::new(|v| {
+                    ["1/1", "1/2", "1/4", "1/8", "1/16"][((v * 5.0) as usize).min(4)].to_string()
+                })),
+            pump_curve: FloatParam::new("Pump Curve", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            parallel: FloatParam::new("Parallel Comp", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
@@ -346,6 +368,9 @@ impl Plugin for Drumlin {
                         2u8 => &params.bus_drive,
                         3u8 => &params.reverb,
                         4u8 => &params.delay,
+                        5u8 => &params.pump_rate,
+                        6u8 => &params.pump_curve,
+                        7u8 => &params.parallel,
                         _ => &params.gain,
                     }
                 }};
@@ -555,6 +580,9 @@ impl Plugin for Drumlin {
         self.kit.set_bus_drive(self.params.bus_drive.value());
         self.kit.set_bus_reverb(self.params.reverb.value());
         self.kit.set_bus_delay(self.params.delay.value());
+        self.kit.set_pump_rate(self.params.pump_rate.value());
+        self.kit.set_pump_curve(self.params.pump_curve.value());
+        self.kit.set_bus_parallel(self.params.parallel.value());
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);
