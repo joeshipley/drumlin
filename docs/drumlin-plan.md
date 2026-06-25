@@ -117,7 +117,7 @@ The design doc commits to most of these; here are the frozen answers we build ag
 
 ## 4. Milestones
 
-**Status (2026-06-24):** M0, M1, **M2 complete and verified.** Workspace builds, `cargo test --workspace` green (139 `dsp_core` + 29 `percussion_core`), `Drumlin.clap`/`Drumlin.app` bundle, AU passes `auval` end-to-end (render at all sample rates + MIDI). M2 shipped Kick/Snare/Clap/Closed+Open-Hat synthesis, choke groups, the 16-step host-synced sequencer, GM note map, local pad audition, and a live editable PRISM grid — then went through an adversarial multi-agent review (17 confirmed findings; the real ones fixed, see below). Next: **M3** (per-voice tail + minimal bus + freeze the Neutral golden anchor).
+**Status (2026-06-24):** M0, M1, M2, **M3 complete and verified.** Workspace builds, `cargo test --workspace` green (139 `dsp_core` + 41 `percussion_core`), `Drumlin.clap`/`Drumlin.app` bundle, AU passes `auval`. M2 shipped Kick/Snare/Clap/Closed+Open-Hat synthesis, choke groups, the 16-step host-synced sequencer, GM note map, local pad audition, and a live editable PRISM grid (then an adversarial multi-agent review — 17 confirmed findings, real ones fixed). **M3** added the uniform per-voice tail (drive → CS-80 dual filter → level → "full-at-center" pan), the **glue → true-peak-limiter bus** ("glue is the headline"), and **froze the Neutral kit as the bit-exact golden anchor** (5 per-voice one-shots + a 1-bar default-pattern render under `crates/percussion_core/golden/`, regenerated only on intended sonic changes). Next: **M4** (the remaining 7 voices: toms, perc/rim/cowbell, ride/crash, FM-perc, noise/FX, sample) — which will deliberately re-freeze the golden.
 
 **Deferred from the M2 review (intentional):**
 - *dsp_core triangle-oscillator denormal flush* — the leaky integrator in `oscillator.rs` isn't `flush_denormal`d. It lives in `dsp_core`, which we keep **byte-identical to Esker** (§0); fixing it here would fork the family DSP. Track as an **upstream Esker item** instead.
@@ -144,7 +144,7 @@ Each milestone lists **deliverables**, the **files** it touches, and its **verif
 - `sequencer.rs`: single 16-step pattern, `Step`/`Track`/`Pattern` POD structs (fixed-capacity, `Copy`), 384 PPQN clock off host transport, `Trigger` ring drained by the engine.
 - Plugin shell: GM note map (C1 kick, D1 snare, F#1 CH, A#1 OH), on-screen 4×4 pad bank → `kbd` ring local audition.
 
-#### M3 — Per-voice tail + minimal bus + **the Neutral golden anchor** — gate: per-voice golden one-shots + default-pattern golden render checked in and bit-exact
+#### M3 — Per-voice tail + minimal bus + **the Neutral golden anchor** ✅ — gate: per-voice golden one-shots + default-pattern golden render checked in and bit-exact
 - Uniform per-voice tail: Level, Pan, Pitch, Decay, CS-80 dual filter, Drive, Send A/B stubs.
 - Minimal bus chain reused from `dsp_core`: glue compressor + true-peak limiter (`Dynamics`). `transient.rs` shaper stub.
 - **Neutral kit** defined and frozen. Land per-voice golden one-shots (16k stereo samples, `to_bits` compare) and the **default-pattern golden render** (Neutral plays pattern A1, 1 bar, seed fixed, 120 BPM, 48 kHz). These become the regression anchors every later refactor is measured against.

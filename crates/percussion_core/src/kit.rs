@@ -1,7 +1,12 @@
-//! `DrumKit` — the 12-track voice rack with choke groups (design §3.2). M2's
-//! Neutral kit voices Kick, Snare, Clap and Closed/Open Hat at their design
-//! track indices; the other 7 tracks are `Silent` until M4.
+//! `DrumKit` — the 12-track voice rack with per-voice tails, choke groups, and
+//! the shared dynamics bus (design §3.1/§3.2/§5.3). Signal flow per track:
+//! voice engine → `VoiceTail` (drive → CS-80 filter → level → pan) → kit sum →
+//! `DrumBus` (glue → true-peak limiter) → output. M3's Neutral kit voices Kick,
+//! Snare, Clap and Closed/Open Hat at their design indices; the other 7 tracks
+//! are `Silent` until M4.
 
+use crate::bus::DrumBus;
+use crate::tail::VoiceTail;
 use crate::voice::{ClapVoice, HatVoice, KickVoice, SnareVoice, Voice};
 use crate::MAX_TRACKS;
 
@@ -10,9 +15,11 @@ use crate::MAX_TRACKS;
 /// 7 RIDE · 8 TOM_LO · 9 TOM_HI · 10 PERC · 11 SAMPLE
 pub struct DrumKit {
     voices: [Voice; MAX_TRACKS],
+    tails: [VoiceTail; MAX_TRACKS],
     /// 0 = no group; 1..=4 = groups A..D. A trigger chokes other sounding
     /// voices sharing its group.
     choke_group: [u8; MAX_TRACKS],
+    bus: DrumBus,
     sr: f32,
 }
 
@@ -26,11 +33,22 @@ impl DrumKit {
         voices[5] = Voice::Hat(HatVoice::closed(sr));
         voices[6] = Voice::Hat(HatVoice::open(sr));
 
+        let mut tails: [VoiceTail; MAX_TRACKS] = core::array::from_fn(|_| VoiceTail::new(sr));
+        // Per-voice Neutral balance + a touch of tail character. Filters default
+        // wide (transparent) except the kick, which gets a gentle HP to clean
+        // the sub. Levels balance the kit before the glue bus.
+        tails[0].set_level(1.00); // KICK
+        tails[0].set_filter(true, 28.0, 20_000.0, 0.0);
+        tails[2].set_level(0.92); // SNARE
+        tails[3].set_level(0.80); // CLAP
+        tails[5].set_level(0.62); // CLHAT
+        tails[6].set_level(0.58); // OPHAT
+
         let mut choke_group = [0u8; MAX_TRACKS];
         choke_group[5] = 1; // closed hat -> group A
         choke_group[6] = 1; // open hat   -> group A (closed chokes open)
 
-        Self { voices, choke_group, sr }
+        Self { voices, tails, choke_group, bus: DrumBus::neutral(sr), sr }
     }
 
     pub fn sample_rate(&self) -> f32 {
@@ -42,9 +60,13 @@ impl DrumKit {
         for v in &mut self.voices {
             v.set_sample_rate(sr);
         }
+        for t in &mut self.tails {
+            t.set_sample_rate(sr);
+        }
+        self.bus.set_sample_rate(sr);
     }
 
-    /// Trigger a track. First applies the choke broadcast (allocation-free, O(12)),
+    /// Trigger a track. Applies the choke broadcast (allocation-free, O(12)),
     /// then triggers the voice.
     pub fn trigger(&mut self, track: usize, velocity: f32, accent: bool) {
         if track >= MAX_TRACKS {
@@ -61,16 +83,18 @@ impl DrumKit {
         self.voices[track].trigger(velocity, accent);
     }
 
-    /// Sum all voices to a stereo frame.
+    /// Sum all voices through their tails, then the glue/limiter bus, to a stereo
+    /// frame.
     pub fn render(&mut self) -> (f32, f32) {
         let mut l = 0.0;
         let mut r = 0.0;
-        for v in &mut self.voices {
+        for (v, t) in self.voices.iter_mut().zip(self.tails.iter_mut()) {
             let (vl, vr) = v.render();
-            l += vl;
-            r += vr;
+            let (tl, tr) = t.process(vl, vr);
+            l += tl;
+            r += tr;
         }
-        (l, r)
+        self.bus.process(l, r)
     }
 
     /// Number of currently-sounding voices (for the GUI voice meter).
@@ -83,10 +107,18 @@ impl DrumKit {
         track < MAX_TRACKS && self.voices[track].is_active()
     }
 
-    /// Panic-reset: silence every voice and clear filter/feedback state.
+    /// Live bus gain reduction (dB), for the GUI glue meter (wired in M9).
+    pub fn bus_gain_reduction_db(&self) -> f32 {
+        self.bus.gain_reduction_db()
+    }
+
+    /// Panic-reset: silence every voice and clear filter/tail state.
     pub fn reset(&mut self) {
         for v in &mut self.voices {
             v.reset();
+        }
+        for t in &mut self.tails {
+            t.reset();
         }
     }
 }
@@ -127,18 +159,15 @@ mod tests {
             let (l, _) = kit.render();
             peak = peak.max(l.abs());
         }
-        assert!(peak > 0.2, "kick via kit should be audible, peak={peak}");
+        assert!(peak > 0.2, "kick via kit+bus should be audible, peak={peak}");
         assert!(kit.active_voices() >= 1);
     }
 
     #[test]
     fn closed_hat_chokes_open_hat() {
-        // Open hat alone rings for a long time; firing the closed hat (same
-        // choke group) should cut that tail short.
         let tail_len = |choke: bool| {
             let mut kit = DrumKit::neutral(48_000.0);
             kit.trigger(6, 1.0, false); // open hat
-            // let it ring a little
             for _ in 0..256 {
                 kit.render();
             }
@@ -164,15 +193,18 @@ mod tests {
     }
 
     #[test]
-    fn whole_kit_stays_finite() {
+    fn whole_kit_stays_finite_and_limited() {
         let mut kit = DrumKit::neutral(48_000.0);
         for t in [0usize, 2, 3, 5, 6] {
             kit.trigger(t, 1.0, true);
         }
+        let mut peak = 0.0_f32;
         for _ in 0..48_000 {
             let (l, r) = kit.render();
             assert!(l.is_finite() && r.is_finite());
-            assert!(l.abs() < 8.0 && r.abs() < 8.0, "kit output unreasonably large");
+            peak = peak.max(l.abs()).max(r.abs());
         }
+        // the true-peak limiter must keep the summed kit under ~0 dBFS
+        assert!(peak <= 1.02, "bus limiter should hold the kit at ~0 dBFS, peak={peak}");
     }
 }

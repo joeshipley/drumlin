@@ -10,18 +10,25 @@
 //! single 16-step host-synced sequencer. Toms/perc/cymbal/FM/sample voices,
 //! p-locks and the full grid arrive at M4/M5.
 
+pub mod bus;
 pub mod clap_diffuser;
 pub mod kit;
 pub mod metal_cluster;
 pub mod pitch_env;
 pub mod sequencer;
+pub mod tail;
 pub mod voice;
 
+#[cfg(test)]
+mod golden;
+
+pub use bus::DrumBus;
 pub use clap_diffuser::ClapDiffuser;
 pub use kit::{track_for_note, DrumKit};
 pub use metal_cluster::MetalCluster;
 pub use pitch_env::DahdEnv;
 pub use sequencer::{Pattern, Sequencer, Step, Track};
+pub use tail::VoiceTail;
 pub use voice::Voice;
 
 /// Fixed track count. Twelve matches the design's voice count and the MPK pad
