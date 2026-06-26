@@ -15,10 +15,13 @@ pub const PITCH_CENTS_FULL: f32 = 15.0;
 pub const LEVEL_PCT_FULL: f32 = 0.06;
 
 /// `mix_seed` purpose codes. 0/1/2 are the sequencer's probability / humanize-
-/// velocity / humanize-timing draws; drift adds these (5 reserved for a future
-/// per-voice micro-timing drift). Stable — M6's RandomPerHit reads the same cells.
+/// velocity / humanize-timing draws; drift adds 3/4 (5 reserved for a future
+/// per-voice micro-timing drift). 6 is M6's mod-matrix `RandomPerHit` source — a
+/// SEPARATE per-cell S&H so it never perturbs the drift draws. Stable codes.
 pub const PURPOSE_DRIFT_PITCH: u32 = 3;
 pub const PURPOSE_DRIFT_LEVEL: u32 = 4;
+/// M6 mod-matrix `RandomPerHit` source (independent of drift's 3/4).
+pub const PURPOSE_MOD_RANDOM: u32 = 6;
 
 /// Cents → frequency ratio: `2^(cents/1200)`. Exactly `1.0` at 0 cents, so a
 /// drift of 0 is a bit-exact no-op multiply on a voice's pitch.

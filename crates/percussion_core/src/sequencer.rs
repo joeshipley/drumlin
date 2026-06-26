@@ -13,7 +13,7 @@
 //! M5 part 2. The audio thread never allocates; pattern state is `Copy` POD.
 
 use crate::plock::{PLock, MAX_PLOCKS};
-use crate::drift::{PURPOSE_DRIFT_LEVEL, PURPOSE_DRIFT_PITCH};
+use crate::drift::{PURPOSE_DRIFT_LEVEL, PURPOSE_DRIFT_PITCH, PURPOSE_MOD_RANDOM};
 use crate::rng::{mix_seed, XorShift32};
 use crate::{Trigger, MAX_STEPS, MAX_TRACKS};
 
@@ -356,6 +356,7 @@ impl Sequencer {
             plock_count: 0,
             rand_pitch: 0.0,
             rand_level: 0.0,
+            rand_mod: 0.0,
         };
         Self {
             pattern,
@@ -729,18 +730,22 @@ impl Sequencer {
             XorShift32::new(mix_seed(self.pattern.seed, t as u32, step_idx as u32, PURPOSE_DRIFT_PITCH)).next_bipolar();
         let rand_level =
             XorShift32::new(mix_seed(self.pattern.seed, t as u32, step_idx as u32, PURPOSE_DRIFT_LEVEL)).next_bipolar();
+        // The mod matrix's RandomPerHit source — a SEPARATE per-cell S&H (purpose
+        // 6), so it never perturbs the drift draws above.
+        let rand_mod =
+            XorShift32::new(mix_seed(self.pattern.seed, t as u32, step_idx as u32, PURPOSE_MOD_RANDOM)).next_bipolar();
 
         // 6. ratchets — spread the sub-hits over the space remaining between the
         //    (swung) start and the next step boundary, so a roll can't spill past it.
         let ratchet = step.ratchet.clamp(1, 8);
         if ratchet <= 1 {
-            self.schedule(i as f64 + base_off, block_len, t, vel, rand_pitch, rand_level, &step);
+            self.schedule(i as f64 + base_off, block_len, t, vel, (rand_pitch, rand_level, rand_mod), &step);
         } else {
             let span = (samples_per_step - base_off).max(samples_per_step * 0.25);
             let spacing = span / ratchet as f64;
             for k in 0..ratchet {
                 let kv = ratchet_velocity(vel, k, ratchet, step.ratchet_ramp);
-                self.schedule(i as f64 + base_off + k as f64 * spacing, block_len, t, kv, rand_pitch, rand_level, &step);
+                self.schedule(i as f64 + base_off + k as f64 * spacing, block_len, t, kv, (rand_pitch, rand_level, rand_mod), &step);
             }
         }
     }
@@ -752,11 +757,11 @@ impl Sequencer {
         block_len: usize,
         track: usize,
         vel: f32,
-        rand_pitch: f32,
-        rand_level: f32,
+        rands: (f32, f32, f32),
         step: &Step,
     ) {
         let off = off_from_block_start.round().max(0.0) as u32;
+        let (rand_pitch, rand_level, rand_mod) = rands;
         let trig = Trigger {
             offset: off,
             track: track as u8,
@@ -766,6 +771,7 @@ impl Sequencer {
             plock_count: step.plock_count,
             rand_pitch,
             rand_level,
+            rand_mod,
         };
         if (off as usize) < block_len {
             self.push_pending(trig);

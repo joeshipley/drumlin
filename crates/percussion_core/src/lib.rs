@@ -71,6 +71,9 @@ pub struct Trigger {
     /// amount; `0.0` (the default / live hits) = no drift.
     pub rand_pitch: f32,
     pub rand_level: f32,
+    /// Seeded per-hit S&H for the mod matrix's `RandomPerHit` source, bipolar
+    /// `-1..1` (independent of the drift draws). `0.0` on live/non-seq hits.
+    pub rand_mod: f32,
 }
 
 impl Trigger {
