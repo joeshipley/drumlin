@@ -24,6 +24,9 @@ pub const DEFAULT_MACRO_LABELS: [&str; 8] =
 /// patch, the mod dests, and the mix. The recall path decodes each variant onto
 /// the matching `DrumKit` / plugin setter. A kit lists only what it touches;
 /// anything absent stays at the default.
+// allow(dead_code): only Neutral (empty rows) exists until chunk 3 adds the
+// factory worlds that construct these variants; `stage_kit` already reads them.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum KitRow {
     /// Per-voice tail patch default: `param` is a `LockableParam` index `0..5`
@@ -57,6 +60,8 @@ pub struct Kit {
     /// The curated parameter overrides; empty = "all defaults" (Neutral).
     pub rows: &'static [KitRow],
     /// K1–K8 labels for this world (display-only — relabels the MOD page knobs).
+    /// Read by the recall relabel in chunk 4.
+    #[allow(dead_code)]
     pub macro_labels: [&'static str; 8],
     /// `Some` for a GROOVE WORLD (recall memcpys it into the selected pattern
     /// slot); `None` for a timbral KIT (leaves the user's pattern untouched).

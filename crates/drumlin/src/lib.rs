@@ -89,6 +89,7 @@ enum Action {
     SetLfo { idx: u8, shape: u8, rate: f32, depth: f32, retrig: bool },
     SetModEnv { attack: f32, decay: f32 },
     SetMacro { idx: u8, value: f32 },
+    RecallKit { id: String },
     Transport { play: bool },
     SeqEnable { on: bool },
     SidechainEnable { on: bool },
@@ -334,8 +335,12 @@ pub struct Drumlin {
     /// drives it cleanly without the internal pattern doubling it.
     seq_enabled: Arc<AtomicBool>,
 
-    /// KIT/preset/pattern panic-reset flag, drained at block start.
-    fx_reset_pending: Arc<AtomicBool>,
+    /// KIT recall signal (M9): the editor stages the new state into `params.state`
+    /// then sets this; the audio thread re-adopts (and cuts tails) at block start.
+    /// Cleared only after a SUCCESSFUL try_lock+adopt, so a recall is never dropped
+    /// on lock contention (it retries next block). Must default false so an
+    /// auval/headless render never spuriously recalls.
+    recall_pending: Arc<AtomicBool>,
 
     /// Set when a sequencer edit lands; the next block snapshots the bank into
     /// the persisted state via a non-blocking `try_lock`, so the audio thread
@@ -376,7 +381,7 @@ impl Default for Drumlin {
             pump_meter: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             effective_playing: Arc::new(AtomicBool::new(false)),
             seq_enabled: Arc::new(AtomicBool::new(true)),
-            fx_reset_pending: Arc::new(AtomicBool::new(false)),
+            recall_pending: Arc::new(AtomicBool::new(false)),
             seq_dirty: false,
             persisted_seq_enabled: true,
             aux_scratch: [(0.0, 0.0); N_AUX],
@@ -427,6 +432,113 @@ fn pattern_cells(p: &Pattern) -> Vec<serde_json::Value> {
 // The AUDIO_IO_LAYOUTS aux_output_ports + aux_outputs literals must stay the same
 // length as the kit's N_AUX (the per-voice OUT picker routes 1..=N_AUX).
 const _: () = assert!(N_AUX == 4, "aux output port count must equal percussion_core::N_AUX");
+
+/// Re-seat the live engine from a (staged) `PersistState`. The single source of
+/// truth for both project load (`initialize`) and KIT recall (the audio-thread
+/// drain). Takes disjoint `&mut` field refs rather than `&mut self` so the caller
+/// can hold the `params.state` lock guard (which borrows `self.params`) at the
+/// same time. `adopt_seq` gates the pattern/seq import: `initialize` passes
+/// `!seq_dirty` (protect unsnapshotted edits); recall passes `true` (a recalled
+/// GROOVE WORLD must load its pattern unconditionally). Alloc-free — every call
+/// is a field write / fixed-count setter / one `copy_from_slice`.
+#[allow(clippy::too_many_arguments)]
+fn adopt_state(
+    kit: &mut DrumKit,
+    seq: &mut Sequencer,
+    mod_engine: &mut ModEngine,
+    macros: &mut [f32; 8],
+    state: &PersistState,
+    adopt_seq: bool,
+) {
+    if adopt_seq {
+        seq.import(&state.seq);
+    }
+    kit.import_patch(&state.voices);
+    kit.import_mix(&state.mix);
+    let ms = &state.mod_state;
+    for (i, sl) in ms.matrix.slots.iter().enumerate() {
+        kit.set_mod_slot(i, sl.src, sl.dst, sl.depth, sl.target_voice);
+    }
+    mod_engine.set_lfo1(lfo_shape(ms.lfo1.shape), ms.lfo1.rate_hz, ms.lfo1.depth, ms.lfo1.retrig);
+    mod_engine.set_lfo2(lfo_shape(ms.lfo2.shape), ms.lfo2.rate_hz, ms.lfo2.depth, ms.lfo2.retrig);
+    mod_engine.set_mod_env(ms.env_attack, ms.env_decay);
+    *macros = ms.macros;
+    kit.set_macros(*macros);
+}
+
+/// The bus-FX host-param values a recalled kit drives (by `pget!` id 1..9) +
+/// the sidechain toggle. `None` = "the kit doesn't set it" -> reset to default.
+struct StagedBus {
+    bus: [Option<f32>; 10],
+    sidechain: Option<bool>,
+}
+
+/// Decode a `Kit` into the staging `PersistState` (the percussion_core half:
+/// voices/mix/mod/pattern), returning the bus-FX + sidechain to drive via the
+/// host-param gesture bridge. The kit is a COMPLETE lens, so the lens-controlled
+/// state is reset to its defaults first, then the kit's curated rows applied —
+/// recall is deterministic regardless of prior state, and Neutral (empty rows,
+/// no pattern) reproduces the defaults exactly. Editor-thread only.
+fn stage_kit(state: &mut PersistState, kit: &kits::Kit) -> StagedBus {
+    use kits::KitRow;
+    state.voices = VoicePatch::default();
+    state.mix = VoiceMix::default();
+    state.mod_state = ModState::default();
+    let mut bus: [Option<f32>; 10] = [None; 10];
+    let mut sidechain = None;
+    for row in kit.rows {
+        match *row {
+            KitRow::Voice { track, param, norm } => {
+                if let Some(p) = LockableParam::from_index(param as u16) {
+                    if (track as usize) < MAX_TRACKS && (param as usize) < N_TAIL_PARAMS {
+                        state.voices.tracks[track as usize][param as usize] = p.denormalize(norm);
+                    }
+                }
+            }
+            KitRow::Mix { track, field, norm } => {
+                if let Some(r) = state.mix.tracks.get_mut(track as usize) {
+                    r.set(field, norm);
+                }
+            }
+            KitRow::ModSlot { slot, src, dst, depth, voice } => {
+                if let Some(sl) = state.mod_state.matrix.slots.get_mut(slot as usize) {
+                    *sl = DrumModSlot {
+                        src: DrumModSource::from_index(src as usize),
+                        dst: DrumModDest::from_index(dst as usize),
+                        depth: depth.clamp(-1.0, 1.0),
+                        target_voice: voice,
+                    };
+                }
+            }
+            KitRow::Lfo { idx, shape, rate, depth, retrig } => {
+                let cfg = LfoCfg { shape, rate_hz: rate, depth, retrig };
+                if idx == 0 {
+                    state.mod_state.lfo1 = cfg;
+                } else {
+                    state.mod_state.lfo2 = cfg;
+                }
+            }
+            KitRow::ModEnv { attack, decay } => {
+                state.mod_state.env_attack = attack;
+                state.mod_state.env_decay = decay;
+            }
+            KitRow::Bus { id, norm } => {
+                if (id as usize) < bus.len() {
+                    bus[id as usize] = Some(norm.clamp(0.0, 1.0));
+                }
+            }
+            KitRow::Sidechain(b) => sidechain = Some(b),
+        }
+    }
+    // GROOVE WORLD: load the embedded pattern into the selected slot.
+    if let Some(p) = kit.pattern {
+        let cur = state.seq.current as usize;
+        if let Some(slot) = state.seq.patterns.get_mut(cur) {
+            *slot = *p;
+        }
+    }
+    StagedBus { bus, sidechain }
+}
 
 /// Map a persisted LFO shape discriminant to the engine enum (unknown -> Sine).
 fn lfo_shape(i: u8) -> ModLfoShape {
@@ -561,6 +673,7 @@ impl Plugin for Drumlin {
         let pump_meter = self.pump_meter.clone();
         let effective_playing = self.effective_playing.clone();
         let seq_enabled = self.seq_enabled.clone();
+        let recall_pending = self.recall_pending.clone();
         // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
         // unchanged status sends.
         let last_status = Arc::new(AtomicU32::new(u32::MAX));
@@ -725,6 +838,34 @@ impl Plugin for Drumlin {
                             }
                         }
                     }
+                    Action::RecallKit { id } => {
+                        if let Some(kit) = kits::FACTORY_KITS.iter().find(|k| k.id == id.as_str()) {
+                            // Stage the percussion_core half under the lock, then
+                            // release BEFORE driving params / signaling (so the
+                            // audio thread's try_lock isn't contended and the flag
+                            // is set only once staging is complete).
+                            let staged = params.state.lock().ok().map(|mut s| stage_kit(&mut s, kit));
+                            if let Some(staged) = staged {
+                                // The bus FX chain is part of the lens: drive ids
+                                // 1..9 to the kit's value or their default (master
+                                // gain, id 0, is left alone). Host-recordable.
+                                for bid in 1u8..=9 {
+                                    let p = pget!(bid);
+                                    let v = staged.bus[bid as usize].unwrap_or_else(|| p.default_normalized_value());
+                                    setter.begin_set_parameter(p);
+                                    setter.set_parameter_normalized(p, v);
+                                    setter.end_set_parameter(p);
+                                }
+                                let sc = staged.sidechain.unwrap_or(false);
+                                setter.begin_set_parameter(&params.sidechain_key);
+                                setter.set_parameter(&params.sidechain_key, sc);
+                                setter.end_set_parameter(&params.sidechain_key);
+                                // Tell the audio thread to adopt the staged state +
+                                // cut tails at block start.
+                                recall_pending.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
                     Action::SeqEnable { on } => seq_enabled.store(on, Ordering::Relaxed),
                     Action::SidechainEnable { on } => {
@@ -789,23 +930,19 @@ impl Plugin for Drumlin {
         // always safe — and a Default patch reproduces the Neutral kit exactly
         // (engine-unit storage is lossless).
         if let Ok(state) = self.params.state.try_lock() {
-            if !self.seq_dirty {
-                self.seq.import(&state.seq);
+            let adopt_seq = !self.seq_dirty;
+            if adopt_seq {
                 self.seq_enabled.store(state.seq_enabled, Ordering::Relaxed);
                 self.persisted_seq_enabled = state.seq_enabled;
             }
-            self.kit.import_patch(&state.voices);
-            self.kit.import_mix(&state.mix);
-            // Seed the mod matrix + LFO/env config + macros from the project.
-            let ms = &state.mod_state;
-            for (i, sl) in ms.matrix.slots.iter().enumerate() {
-                self.kit.set_mod_slot(i, sl.src, sl.dst, sl.depth, sl.target_voice);
-            }
-            self.mod_engine.set_lfo1(lfo_shape(ms.lfo1.shape), ms.lfo1.rate_hz, ms.lfo1.depth, ms.lfo1.retrig);
-            self.mod_engine.set_lfo2(lfo_shape(ms.lfo2.shape), ms.lfo2.rate_hz, ms.lfo2.depth, ms.lfo2.retrig);
-            self.mod_engine.set_mod_env(ms.env_attack, ms.env_decay);
-            self.macros = ms.macros;
-            self.kit.set_macros(self.macros);
+            adopt_state(
+                &mut self.kit,
+                &mut self.seq,
+                &mut self.mod_engine,
+                &mut self.macros,
+                &state,
+                adopt_seq,
+            );
         }
         true
     }
@@ -823,9 +960,29 @@ impl Plugin for Drumlin {
         aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Once per block: panic-reset on a pending KIT/pattern jump.
-        if self.fx_reset_pending.swap(false, Ordering::Relaxed) {
-            self.kit.reset();
+        // Once per block: adopt a pending KIT recall. The editor has staged the
+        // new state into params.state; re-seat the live engine from it and cut
+        // tails on the jump. Clear the flag ONLY on a successful try_lock+adopt,
+        // so a recall can't be dropped on lock contention (it retries next block),
+        // and the tail-cut is coupled to the actual adoption (never a block early).
+        // seq_dirty is cleared so the post-edit snapshot doesn't re-export over
+        // the just-recalled state.
+        if self.recall_pending.load(Ordering::Relaxed) {
+            if let Ok(state) = self.params.state.try_lock() {
+                adopt_state(
+                    &mut self.kit,
+                    &mut self.seq,
+                    &mut self.mod_engine,
+                    &mut self.macros,
+                    &state,
+                    true,
+                );
+                self.seq_enabled.store(state.seq_enabled, Ordering::Relaxed);
+                self.persisted_seq_enabled = state.seq_enabled;
+                self.seq_dirty = false;
+                self.kit.reset(); // cut tails at the jump
+                self.recall_pending.store(false, Ordering::Relaxed);
+            }
         }
 
         // Once per block: apply queued edits from the GUI.
@@ -1130,6 +1287,45 @@ nih_export_clap!(Drumlin);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_kit_resets_then_applies_rows() {
+        use kits::{Kit, KitRow, DEFAULT_MACRO_LABELS};
+        let kit = Kit {
+            id: "t",
+            name: "T",
+            blurb: "",
+            rows: &[
+                KitRow::Voice { track: 0, param: 2, norm: 0.3 }, // kick Cutoff
+                KitRow::Mix { track: 2, field: 0, norm: 0.6 },    // snare Send A
+                KitRow::ModSlot { slot: 0, src: 3, dst: 3, depth: 0.5, voice: 255 }, // LFO1->Cutoff
+                KitRow::Lfo { idx: 0, shape: 2, rate: 8.0, depth: 1.0, retrig: false },
+                KitRow::ModEnv { attack: 0.01, decay: 0.4 },
+                KitRow::Bus { id: 1, norm: 0.8 },                 // pump
+                KitRow::Sidechain(true),
+            ],
+            macro_labels: DEFAULT_MACRO_LABELS,
+            pattern: None,
+        };
+        let mut state = PersistState::default();
+        state.voices.tracks[0][0] = 9.9; // dirty a param the kit DOESN'T set
+        let staged = stage_kit(&mut state, &kit);
+
+        // The kit is a complete lens: the un-listed dirtied param reset to default.
+        assert_eq!(state.voices.tracks[0][0], VoicePatch::default().tracks[0][0], "reset before apply");
+        // Listed rows applied.
+        assert!((state.voices.tracks[0][2] - LockableParam::Cutoff.denormalize(0.3)).abs() < 1e-3);
+        assert!((state.mix.tracks[2].send_a - 0.6).abs() < 1e-6);
+        assert_eq!(state.mod_state.matrix.slots[0].src, DrumModSource::Lfo1);
+        assert_eq!(state.mod_state.matrix.slots[0].dst, DrumModDest::Cutoff);
+        assert_eq!(state.mod_state.lfo1.shape, 2);
+        assert!((state.mod_state.lfo1.rate_hz - 8.0).abs() < 1e-6);
+        assert!((state.mod_state.env_decay - 0.4).abs() < 1e-6);
+        // Bus pump staged; an unlisted bus param is None (the driver resets it).
+        assert_eq!(staged.bus[1], Some(0.8));
+        assert_eq!(staged.bus[3], None);
+        assert_eq!(staged.sidechain, Some(true));
+    }
 
     /// The real persistence path: program a bank, JSON round-trip the persisted
     /// blob (exactly what `nih-plug` serializes into the host project), and
