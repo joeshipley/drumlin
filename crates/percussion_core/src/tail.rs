@@ -7,7 +7,12 @@
 //! reverb/delay Sends land with Send A/B (M8). Each channel has independent
 //! filter/drive state so a stereo voice (the clap) keeps its width.
 
-use synth_core::{Drive, DriveKind, Filter};
+use synth_core::{Drive, DriveKind, Filter, ShelfEq};
+
+/// Trim-EQ shelf corner frequencies (Hz): a low shelf for body/boom and a high
+/// shelf for air/crispness.
+const EQ_LOW_HZ: f32 = 150.0;
+const EQ_HIGH_HZ: f32 = 4_000.0;
 
 pub struct VoiceTail {
     sr: f32,
@@ -17,6 +22,8 @@ pub struct VoiceTail {
     lp_r: Filter,
     drive_l: Drive,
     drive_r: Drive,
+    eq_l: ShelfEq,
+    eq_r: ShelfEq,
     // stored config so a sample-rate change can re-apply it
     hp_hz: f32,
     lp_hz: f32,
@@ -24,6 +31,8 @@ pub struct VoiceTail {
     drive_kind: DriveKind,
     drive_amt: f32,
     drive_tone: f32,
+    eq_low_db: f32,
+    eq_high_db: f32,
     level: f32,
     pan: f32,
     filter_on: bool,
@@ -40,12 +49,16 @@ impl VoiceTail {
             lp_r: Filter::new(sr),
             drive_l: Drive::new(sr),
             drive_r: Drive::new(sr),
+            eq_l: ShelfEq::new(sr),
+            eq_r: ShelfEq::new(sr),
             hp_hz: 20.0,
             lp_hz: 20_000.0,
             res: 0.0,
             drive_kind: DriveKind::Tube,
             drive_amt: 0.0,
             drive_tone: 0.5,
+            eq_low_db: 0.0,
+            eq_high_db: 0.0,
             level: 1.0,
             pan: 0.0,
             filter_on: true,
@@ -68,6 +81,8 @@ impl VoiceTail {
             .set_params(self.drive_on, self.drive_kind, self.drive_amt, self.drive_tone, 16.0, 1.0, 0.0, 1.0);
         self.drive_r
             .set_params(self.drive_on, self.drive_kind, self.drive_amt, self.drive_tone, 16.0, 1.0, 0.0, 1.0);
+        self.eq_l.set_params(EQ_LOW_HZ, self.eq_low_db, EQ_HIGH_HZ, self.eq_high_db);
+        self.eq_r.set_params(EQ_LOW_HZ, self.eq_low_db, EQ_HIGH_HZ, self.eq_high_db);
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
@@ -78,7 +93,17 @@ impl VoiceTail {
         self.lp_r.set_sample_rate(sr);
         self.drive_l.set_sample_rate(sr);
         self.drive_r.set_sample_rate(sr);
+        self.eq_l.set_sample_rate(sr);
+        self.eq_r.set_sample_rate(sr);
         self.apply();
+    }
+
+    /// 2-band trim EQ: low/high shelf gains in dB (0 dB = flat = bypass).
+    pub fn set_eq(&mut self, low_db: f32, high_db: f32) {
+        self.eq_low_db = low_db;
+        self.eq_high_db = high_db;
+        self.eq_l.set_params(EQ_LOW_HZ, low_db, EQ_HIGH_HZ, high_db);
+        self.eq_r.set_params(EQ_LOW_HZ, low_db, EQ_HIGH_HZ, high_db);
     }
 
     pub fn set_level(&mut self, level: f32) {
@@ -159,6 +184,9 @@ impl VoiceTail {
             l = self.lp_l.process(self.hp_l.process_high(l));
             r = self.lp_r.process(self.hp_r.process_high(r));
         }
+        // Trim EQ (bypasses internally when flat -> exact passthrough).
+        l = self.eq_l.process(l);
+        r = self.eq_r.process(r);
         let (gl, gr) = pan_gains(self.pan);
         (l * self.level * gl, r * self.level * gr)
     }
@@ -168,6 +196,8 @@ impl VoiceTail {
         self.hp_r.reset();
         self.lp_l.reset();
         self.lp_r.reset();
+        self.eq_l.reset();
+        self.eq_r.reset();
     }
 }
 

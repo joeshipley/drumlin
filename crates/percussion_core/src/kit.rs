@@ -68,7 +68,15 @@ pub struct VoiceMixRow {
     /// other sounding voices sharing its group (e.g. closed hat chokes open hat).
     #[cfg_attr(feature = "serde", serde(default))]
     pub choke_group: u8,
+    /// 2-band trim EQ shelf gains, dB (0 = flat). Low shelf + high shelf.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub eq_low_db: f32,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub eq_high_db: f32,
 }
+
+/// Trim-EQ shelf gain range: a normalized `0..1` slider maps to ±`EQ_DB_RANGE`.
+const EQ_DB_RANGE: f32 = 12.0;
 
 /// Below this, a send snaps to exactly 0.0 so the persisted value, the bus
 /// engage gate, and the per-sample render tap all agree on "off" (no sub-
@@ -77,9 +85,10 @@ const SEND_FLOOR: f32 = 0.0001;
 
 impl VoiceMixRow {
     /// Apply one MIX edit: `field` 0 = Send A, 1 = Send B, 2 = mute, 3 = solo,
-    /// 4 = gated_verb (bools as `> 0.5`), 5 = choke_group (0..=4). The single
-    /// source of this mapping — shared by the audio-thread kit update and the
-    /// editor-thread persist write, so they can't drift.
+    /// 4 = gated_verb (bools as `> 0.5`), 5 = choke_group (0..=4), 6/7 = EQ low/
+    /// high shelf (normalized 0..1, 0.5 = flat). The single source of this mapping
+    /// — shared by the audio-thread kit update and the editor-thread persist
+    /// write, so they can't drift.
     pub fn set(&mut self, field: u8, value: f32) {
         match field {
             0 => self.send_a = Self::snap_send(value),
@@ -88,6 +97,9 @@ impl VoiceMixRow {
             3 => self.solo = value > 0.5,
             4 => self.gated_verb = value > 0.5,
             5 => self.choke_group = value.clamp(0.0, 4.0).round() as u8,
+            // EQ: normalized 0..1 slider (0.5 = flat) -> ±EQ_DB_RANGE dB.
+            6 => self.eq_low_db = (value.clamp(0.0, 1.0) - 0.5) * 2.0 * EQ_DB_RANGE,
+            7 => self.eq_high_db = (value.clamp(0.0, 1.0) - 0.5) * 2.0 * EQ_DB_RANGE,
             _ => {}
         }
     }
@@ -99,6 +111,16 @@ impl VoiceMixRow {
         } else {
             0.0
         }
+    }
+
+    /// EQ shelf gains as normalized `0..1` (0.5 = flat) — the inverse of `set`'s
+    /// fields 6/7. The single source for both the GUI seed and `voice_mix`, so
+    /// the encode/decode can't drift if `EQ_DB_RANGE` is retuned.
+    pub fn eq_low_norm(&self) -> f32 {
+        self.eq_low_db / (2.0 * EQ_DB_RANGE) + 0.5
+    }
+    pub fn eq_high_norm(&self) -> f32 {
+        self.eq_high_db / (2.0 * EQ_DB_RANGE) + 0.5
     }
 }
 
@@ -377,13 +399,19 @@ impl DrumKit {
     }
 
     /// Set a track's MIX-strip value. `field`: 0 = Send A, 1 = Send B, 2 = mute,
-    /// 3 = solo, 4 = gated_verb (bools as `> 0.5`). Sends/mute/solo/gated-verb,
-    /// not Level/Pan (those are VOICE patch params via `set_voice_param`).
+    /// 3 = solo, 4 = gated_verb, 5 = choke_group, 6 = EQ low, 7 = EQ high.
+    /// Sends/mute/solo/gated-verb/choke/EQ, not Level/Pan (those are VOICE patch
+    /// params via `set_voice_param`).
     pub fn set_voice_mix(&mut self, track: usize, field: u8, value: f32) {
         if track >= MAX_TRACKS {
             return;
         }
         self.mix[track].set(field, value);
+        if field == 6 || field == 7 {
+            // EQ lives on the tail; push the new shelf gains onto it.
+            let m = self.mix[track];
+            self.tails[track].set_eq(m.eq_low_db, m.eq_high_db);
+        }
         self.recompute_mix_flags();
     }
 
@@ -400,6 +428,8 @@ impl DrumKit {
             3 => f32::from(m.solo),
             4 => f32::from(m.gated_verb),
             5 => f32::from(m.choke_group),
+            6 => m.eq_low_norm(),
+            7 => m.eq_high_norm(),
             _ => 0.0,
         }
     }
@@ -412,6 +442,10 @@ impl DrumKit {
     /// Adopt a persisted MIX state (host project load).
     pub fn import_mix(&mut self, mix: &VoiceMix) {
         self.mix = mix.tracks;
+        // EQ lives on the tails — push each track's persisted shelves onto them.
+        for t in 0..MAX_TRACKS {
+            self.tails[t].set_eq(self.mix[t].eq_low_db, self.mix[t].eq_high_db);
+        }
         self.recompute_mix_flags();
     }
 
@@ -604,6 +638,26 @@ mod tests {
         assert_eq!(k.voice_mix(0, 0), 0.0, "a sub-threshold send must snap to exactly 0");
         k.set_voice_mix(0, 0, 0.5);
         assert!((k.voice_mix(0, 0) - 0.5).abs() < 1e-6, "a real send is kept");
+    }
+
+    #[test]
+    fn voice_eq_is_flat_by_default_and_active_when_set() {
+        let render = |setup: &dyn Fn(&mut DrumKit)| {
+            let mut k = DrumKit::neutral(48_000.0);
+            setup(&mut k);
+            k.trigger(0, 1.0, true, &[]); // kick (rich lows for the low shelf)
+            (0..2_000).map(|_| k.render().0).collect::<Vec<f32>>()
+        };
+        let flat = render(&|_k| {});
+        let boosted = render(&|k| k.set_voice_mix(0, 6, 1.0)); // +12 dB low shelf
+        let diff: f32 = flat.iter().zip(&boosted).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.01, "engaging the EQ must change the kick output, diff={diff}");
+
+        // EQ value round-trips through the normalized encoding.
+        let mut k = DrumKit::neutral(48_000.0);
+        k.set_voice_mix(2, 7, 0.75); // snare high shelf
+        assert!((k.voice_mix(2, 7) - 0.75).abs() < 1e-3);
+        assert_eq!(k.voice_mix(0, 6), 0.5, "an un-set EQ reads back as flat (0.5)");
     }
 
     #[test]
