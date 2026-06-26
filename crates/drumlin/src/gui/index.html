@@ -120,6 +120,17 @@
   .kit-card.on .kit-name { color: var(--accent); }
   .kit-card .kit-blurb { font-family: var(--mono); font-size: 8px; letter-spacing: 0.3px; color: var(--dim-3); margin-top: 3px; }
   .kit-card .kit-world { float: right; color: var(--accent); font-size: 9px; }
+  .kits-ph { font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; color: var(--dim-3); margin: 20px 0 8px; }
+  .kits-saverow { display: flex; gap: 8px; margin-bottom: 10px; }
+  .kits-saverow input { flex: 0 0 220px; font-family: var(--mono); font-size: 10px; background: var(--panel-2); color: var(--dim); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; }
+  .kit-savebtn { font-family: var(--mono); font-size: 9px; letter-spacing: 1px; color: var(--dim); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: default; }
+  .kit-savebtn:hover { border-color: rgba(224,163,62,0.4); color: var(--accent); }
+  .kits-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .preset-card { display: flex; align-items: center; justify-content: space-between; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; cursor: default; }
+  .preset-card:hover { border-color: rgba(224,163,62,0.4); }
+  .preset-card .p-name { font-family: var(--mono); font-size: 10px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .preset-card .p-del { font-family: var(--mono); font-size: 11px; color: var(--dim-3); padding: 0 4px; cursor: default; }
+  .preset-card .p-del:hover { color: #d9694a; }
   .insp { width: 232px; flex: 0 0 232px; background: var(--panel-2); border-left: 1px solid var(--border); padding: 11px 12px; overflow-y: auto; font-size: 11px; }
   .insp h4 { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; margin: 12px 0 7px; }
   .insp h4:first-child { margin-top: 0; }
@@ -209,7 +220,13 @@
       <div class="kits-wrap" id="kitsView" style="display:none">
         <div class="voice-h">KITS · GROOVE WORLDS — recall the whole machine in one touch</div>
         <div class="kits-grid" id="kitsGrid"></div>
-        <div class="voice-hint">A KIT recalls all 12 voices + bus FX + the mod matrix; a GROOVE WORLD (★) also loads its pattern. Saved with the project.</div>
+        <div class="kits-ph">USER PRESETS</div>
+        <div class="kits-saverow">
+          <input id="presetName" type="text" placeholder="preset name" maxlength="64">
+          <button id="presetSave" class="kit-savebtn">SAVE CURRENT</button>
+        </div>
+        <div class="kits-presets" id="kitsPresets"></div>
+        <div class="voice-hint">A KIT recalls all 12 voices + bus FX + the mod matrix; a GROOVE WORLD (★) also loads its pattern. SAVE snapshots the whole machine to disk; click a preset to load it.</div>
       </div>
     </div>
 
@@ -711,8 +728,9 @@
   }
 
   // ---- KITS page ----
-  let kitList = [];      // [{id, name, blurb, world}] from the Init payload
-  let curKitId = null;   // highlighted kit id (recall is wired in chunk 2)
+  let kitList = [];      // [{id, name, blurb, world}] factory kits from Init
+  let presetList = [];   // user preset names (disk) from Init / "presets" msgs
+  let curKitId = null;   // highlighted kit id
   function buildKits() {
     const root = document.getElementById("kitsGrid");
     root.innerHTML = "";
@@ -725,11 +743,28 @@
         curKitId = k.id;
         root.querySelectorAll(".kit-card").forEach(c => c.classList.remove("on"));
         card.classList.add("on");
-        send({ type: "recall-kit", id: k.id }); // handler lands in chunk 2
+        send({ type: "recall-kit", id: k.id });
       });
       root.appendChild(card);
     });
+    // User presets (disk): click to load, × to delete.
+    const pr = document.getElementById("kitsPresets");
+    pr.innerHTML = "";
+    presetList.forEach(name => {
+      const card = document.createElement("div"); card.className = "preset-card";
+      const nm = document.createElement("span"); nm.className = "p-name"; nm.textContent = name;
+      nm.title = "load " + name;
+      nm.addEventListener("click", () => send({ type: "preset-load", name }));
+      const del = document.createElement("span"); del.className = "p-del"; del.textContent = "×"; del.title = "delete";
+      del.addEventListener("click", (e) => { e.stopPropagation(); send({ type: "preset-delete", name }); });
+      card.appendChild(nm); card.appendChild(del); pr.appendChild(card);
+    });
   }
+  document.getElementById("presetSave").addEventListener("click", () => {
+    const el = document.getElementById("presetName");
+    const name = (el.value || "").trim();
+    if (name) { send({ type: "preset-save", name }); el.value = ""; }
+  });
 
   // ---- playhead + status ----
   function setPlayhead(col) {
@@ -791,9 +826,14 @@
       if (Array.isArray(msg.kits)) { kitList = msg.kits; if (curView === "kits") buildKits(); }
       // Seed the K1-K8 macro labels (world relabel).
       if (Array.isArray(msg.macro_labels)) { macroLabels = msg.macro_labels; if (curView === "mod") buildMod(); }
+      // Seed the user-preset browser list.
+      if (Array.isArray(msg.presets)) { presetList = msg.presets; if (curView === "kits") buildKits(); }
     } else if (msg.type === "macro-labels") {
       // A KIT recall relabeled the macros: update + repaint if on the MOD page.
       if (Array.isArray(msg.labels)) { macroLabels = msg.labels; if (curView === "mod") buildMod(); }
+    } else if (msg.type === "presets") {
+      // Save/delete refreshed the disk list.
+      presetList = msg.presets || []; if (curView === "kits") buildKits();
     } else if (msg.type === "status") {
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";

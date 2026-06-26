@@ -9,6 +9,7 @@
 //! mod matrix and KITS arrive at M3+. See `docs/drumlin-plan.md`.
 
 mod kits;
+mod presets;
 mod worlds;
 
 use nih_plug::prelude::*;
@@ -91,6 +92,9 @@ enum Action {
     SetModEnv { attack: f32, decay: f32 },
     SetMacro { idx: u8, value: f32 },
     RecallKit { id: String },
+    PresetSave { name: String },
+    PresetLoad { name: String },
+    PresetDelete { name: String },
     Transport { play: bool },
     SeqEnable { on: bool },
     SidechainEnable { on: bool },
@@ -635,6 +639,44 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix, mod_state: &Mo
     })
 }
 
+/// The 9 bus-FX params (pget! ids 1..=9) as normalized values, for the GUI
+/// sliders + preset snapshots.
+fn bus_values(params: &DrumlinParams) -> [f32; 9] {
+    [
+        params.pump.unmodulated_normalized_value(),
+        params.bus_drive.unmodulated_normalized_value(),
+        params.reverb.unmodulated_normalized_value(),
+        params.delay.unmodulated_normalized_value(),
+        params.pump_rate.unmodulated_normalized_value(),
+        params.pump_curve.unmodulated_normalized_value(),
+        params.parallel.unmodulated_normalized_value(),
+        params.punch.unmodulated_normalized_value(),
+        params.gate_time.unmodulated_normalized_value(),
+    ]
+}
+
+/// The complete GUI seed payload: the bank + voice/mix/mod + the bus sliders,
+/// sidechain, macro labels, and the user-preset list. Used by Init AND after a
+/// preset load (so the whole GUI refreshes to the loaded state).
+#[allow(clippy::too_many_arguments)]
+fn full_json(
+    seq: &SeqState,
+    voices: &VoicePatch,
+    mix: &VoiceMix,
+    mod_state: &ModState,
+    macro_labels: &[String; 8],
+    bus: &[f32; 9],
+    sidechain: bool,
+    user_presets: &[String],
+) -> serde_json::Value {
+    let mut msg = bank_json(seq, voices, mix, mod_state);
+    msg["busfx"] = json!(bus);
+    msg["sidechain"] = json!(sidechain);
+    msg["macro_labels"] = json!(macro_labels);
+    msg["presets"] = json!(user_presets);
+    msg
+}
+
 impl Plugin for Drumlin {
     const NAME: &'static str = "Drumlin";
     const VENDOR: &'static str = "Joe Shipley";
@@ -740,21 +782,10 @@ impl Plugin for Drumlin {
                         // params + the SC toggle are host-persisted but the sliders
                         // are otherwise write-only.)
                         if let Ok(s) = params.state.lock() {
-                            let mut msg = bank_json(&s.seq, &s.voices, &s.mix, &s.mod_state);
-                            // Bus-FX slider values, normalized, in pget! id order 1..=9.
-                            msg["busfx"] = json!([
-                                params.pump.unmodulated_normalized_value(),
-                                params.bus_drive.unmodulated_normalized_value(),
-                                params.reverb.unmodulated_normalized_value(),
-                                params.delay.unmodulated_normalized_value(),
-                                params.pump_rate.unmodulated_normalized_value(),
-                                params.pump_curve.unmodulated_normalized_value(),
-                                params.parallel.unmodulated_normalized_value(),
-                                params.punch.unmodulated_normalized_value(),
-                                params.gate_time.unmodulated_normalized_value(),
-                            ]);
-                            msg["sidechain"] = json!(params.sidechain_key.value());
-                            msg["macro_labels"] = json!(s.macro_labels);
+                            let msg = full_json(
+                                &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
+                                &bus_values(&params), params.sidechain_key.value(), &presets::list(),
+                            );
                             ctx.send_json(msg);
                         }
                     }
@@ -878,6 +909,59 @@ impl Plugin for Drumlin {
                                 recall_pending.store(true, Ordering::Relaxed);
                                 // Relabel the MOD-page macro knobs for this world.
                                 ctx.send_json(json!({ "type": "macro-labels", "labels": kit.macro_labels }));
+                            }
+                        }
+                    }
+                    Action::PresetSave { name } => {
+                        // Snapshot the whole machine (state + bus + sidechain) to
+                        // disk on the editor thread, then refresh the browser list.
+                        let snap = params.state.lock().ok().map(|s| presets::DiskPreset {
+                            format: "drumlin-preset-v1".to_string(),
+                            name: name.clone(),
+                            voices: s.voices.clone(),
+                            mix: s.mix.clone(),
+                            mod_state: s.mod_state.clone(),
+                            macro_labels: s.macro_labels.clone(),
+                            bus: bus_values(&params),
+                            sidechain: params.sidechain_key.value(),
+                        });
+                        if let Some(snap) = snap {
+                            let _ = presets::save(&snap);
+                            ctx.send_json(json!({ "type": "presets", "presets": presets::list() }));
+                        }
+                    }
+                    Action::PresetDelete { name } => {
+                        let _ = presets::delete(&name);
+                        ctx.send_json(json!({ "type": "presets", "presets": presets::list() }));
+                    }
+                    Action::PresetLoad { name } => {
+                        if let Some(preset) = presets::load(&name) {
+                            // A preset replaces the SOUND only (voices/mix/mod/labels),
+                            // leaving the project's pattern bank. Re-seed the GUI from
+                            // the loaded sound + the (unchanged) current bank.
+                            let plist = presets::list();
+                            let msg = params.state.lock().ok().map(|mut s| {
+                                s.voices = preset.voices;
+                                s.mix = preset.mix;
+                                s.mod_state = preset.mod_state;
+                                s.macro_labels = preset.macro_labels;
+                                full_json(
+                                    &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
+                                    &preset.bus, preset.sidechain, &plist,
+                                )
+                            });
+                            if let Some(msg) = msg {
+                                for bid in 1u8..=9 {
+                                    let p = pget!(bid);
+                                    setter.begin_set_parameter(p);
+                                    setter.set_parameter_normalized(p, preset.bus[(bid - 1) as usize]);
+                                    setter.end_set_parameter(p);
+                                }
+                                setter.begin_set_parameter(&params.sidechain_key);
+                                setter.set_parameter(&params.sidechain_key, preset.sidechain);
+                                setter.end_set_parameter(&params.sidechain_key);
+                                recall_pending.store(true, Ordering::Relaxed);
+                                ctx.send_json(msg);
                             }
                         }
                     }
