@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, O
 use std::sync::{Arc, Mutex};
 
 use percussion_core::{
-    track_for_note, DrumKit, LockableParam, Pattern, SeqState, Sequencer, TrigCondition, VoiceMix,
-    VoicePatch, MAX_STEPS, MAX_TRACKS, N_AUX, N_TAIL_PARAMS,
+    track_for_note, DrumKit, LockableParam, ModEngine, Pattern, SeqState, Sequencer, TrigCondition,
+    VoiceMix, VoicePatch, MAX_STEPS, MAX_TRACKS, N_AUX, N_TAIL_PARAMS,
 };
 
 const EDITOR_WIDTH: u32 = 1100;
@@ -214,6 +214,14 @@ pub struct Drumlin {
 
     kit: DrumKit,
     seq: Sequencer,
+    /// The global mod sources (2 LFOs + mod-env). Advanced once per block on the
+    /// host thread; its values are pushed into the kit via `set_mod_globals`.
+    mod_engine: ModEngine,
+    /// Latched mod-wheel (CC1) value, `0..1`; pushed to the kit each block.
+    mod_wheel: f32,
+    /// Rising-edge tracker for `run` (sequencer playing), to fire the mod-env /
+    /// retrigger LFOs on transport start.
+    was_running: bool,
     /// Internal preview transport position (quarter notes); used in standalone
     /// or when the host is stopped but the GUI PLAY is engaged.
     internal_pos_qn: f64,
@@ -272,6 +280,9 @@ impl Default for Drumlin {
             sample_rate: 48_000.0,
             kit: DrumKit::neutral(48_000.0),
             seq: Sequencer::new(),
+            mod_engine: ModEngine::new(48_000.0),
+            mod_wheel: 0.0,
+            was_running: false,
             internal_pos_qn: 0.0,
             was_internal_playing: false,
             kbd_tx: Some(kbd_tx),
@@ -619,6 +630,7 @@ impl Plugin for Drumlin {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.kit.set_sample_rate(buffer_config.sample_rate);
+        self.mod_engine.set_sample_rate(buffer_config.sample_rate);
         // Adopt any host-restored project state (the pattern bank, SEQ enable,
         // and the per-voice patch). The bank import is skipped if a step edit is
         // still un-snapshotted (`seq_dirty`), so a mid-session sample-rate
@@ -778,6 +790,20 @@ impl Plugin for Drumlin {
 
         self.seq.set_playing(run);
         self.effective_playing.store(run, Ordering::Relaxed);
+
+        // Mod sources (M6): on the transport play-start edge fire the mod-env +
+        // reset retrigger LFOs; then advance the engine over this block and push
+        // the latched LFO/env + mod-wheel values into the kit. The matrix reads
+        // them per hit (an all-Off matrix ignores them, so this is inert until a
+        // route is wired). LFO config / macros arrive with the MOD page.
+        if run && !self.was_running {
+            self.mod_engine.retrigger();
+        }
+        self.was_running = run;
+        self.mod_engine.advance(block_len);
+        self.kit.set_mod_globals(self.mod_engine.lfo1(), self.mod_engine.lfo2(), self.mod_engine.mod_env());
+        self.kit.set_mod_wheel(self.mod_wheel);
+
         self.seq.process_block(pos_qn, tempo, sr, block_len);
 
         // Advance the internal preview clock to the block END (where the
@@ -802,10 +828,16 @@ impl Plugin for Drumlin {
                 if event.timing() as usize > i {
                     break;
                 }
-                if let NoteEvent::NoteOn { note, velocity, .. } = event {
-                    if let Some(t) = track_for_note(note) {
-                        self.kit.trigger(t, velocity, false, &[]);
+                match event {
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        if let Some(t) = track_for_note(note) {
+                            self.kit.trigger(t, velocity, false, &[]);
+                        }
                     }
+                    // Mod-wheel (CC1) feeds the ModWheel mod source. Latched for
+                    // the next block's fan-in (sources are sampled per hit).
+                    NoteEvent::MidiCC { cc: 1, value, .. } => self.mod_wheel = value,
+                    _ => {}
                 }
                 next_midi = context.next_event();
             }

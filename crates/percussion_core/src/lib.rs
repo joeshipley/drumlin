@@ -15,6 +15,7 @@ pub mod clap_diffuser;
 pub mod drift;
 pub mod kit;
 pub mod metal_cluster;
+pub mod mod_engine;
 pub mod mod_matrix;
 pub mod pitch_env;
 pub mod plock;
@@ -31,6 +32,7 @@ pub use bus::DrumBus;
 pub use clap_diffuser::ClapDiffuser;
 pub use kit::{track_for_note, DrumKit, VoiceMix, VoiceMixRow, VoicePatch, N_AUX};
 pub use metal_cluster::MetalCluster;
+pub use mod_engine::{ModEngine, ModLfoShape};
 pub use mod_matrix::{
     DrumModDest, DrumModMatrix, DrumModSlot, DrumModSource, ModGlobals, ALL_VOICES, N_DRUM_DESTS,
     N_DRUM_SLOTS, N_DRUM_SOURCES,

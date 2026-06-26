@@ -1067,6 +1067,22 @@ mod tests {
     }
 
     #[test]
+    fn global_lfo_source_reaches_a_dest_via_set_mod_globals() {
+        use crate::mod_matrix::{DrumModDest, DrumModSource, ALL_VOICES};
+        // The plugin's block-rate fan-in path: set_mod_globals pushes the LFO
+        // values, which the matrix reads as the Lfo1 source. Two different LFO1
+        // values routed to Cutoff must produce two different hits.
+        fn render_kick(lfo1: f32) -> Vec<f32> {
+            let mut k = DrumKit::neutral(48_000.0);
+            k.set_mod_slot(0, DrumModSource::Lfo1, DrumModDest::Cutoff, 1.0, ALL_VOICES);
+            k.set_mod_globals(lfo1, 0.0, 0.0);
+            k.trigger(0, 1.0, false, &[]);
+            (0..2_000).map(|_| k.render().0).collect()
+        }
+        assert!(render_kick(0.8) != render_kick(-0.8), "the global LFO1 source must reach Cutoff via set_mod_globals");
+    }
+
+    #[test]
     fn sub_threshold_send_snaps_to_zero() {
         // Below SEND_FLOOR a send snaps to exactly 0 so the engage gate and the
         // render tap agree (no sub-threshold send that routes nothing yet engages).
