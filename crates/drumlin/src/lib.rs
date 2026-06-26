@@ -9,6 +9,7 @@
 //! mod matrix and KITS arrive at M3+. See `docs/drumlin-plan.md`.
 
 mod kits;
+mod worlds;
 
 use nih_plug::prelude::*;
 use nih_plug_webview::{HTMLSource, WebViewEditor};
@@ -530,11 +531,12 @@ fn stage_kit(state: &mut PersistState, kit: &kits::Kit) -> StagedBus {
             KitRow::Sidechain(b) => sidechain = Some(b),
         }
     }
-    // GROOVE WORLD: load the embedded pattern into the selected slot.
-    if let Some(p) = kit.pattern {
+    // GROOVE WORLD: build the embedded groove (editor-thread) and load it into
+    // the selected pattern slot.
+    if let Some(build) = kit.pattern {
         let cur = state.seq.current as usize;
         if let Some(slot) = state.seq.patterns.get_mut(cur) {
-            *slot = *p;
+            *slot = build();
         }
     }
     StagedBus { bus, sidechain }
@@ -1325,6 +1327,20 @@ mod tests {
         assert_eq!(staged.bus[1], Some(0.8));
         assert_eq!(staged.bus[3], None);
         assert_eq!(staged.sidechain, Some(true));
+    }
+
+    #[test]
+    fn all_factory_kits_stage_cleanly() {
+        for kit in kits::FACTORY_KITS {
+            let mut state = PersistState::default();
+            let _ = stage_kit(&mut state, kit);
+            // A GROOVE WORLD must have loaded a non-empty groove into the slot.
+            if kit.pattern.is_some() {
+                let cur = state.seq.current as usize;
+                let any_on = state.seq.patterns[cur].tracks.iter().any(|t| t.steps.iter().any(|s| s.on));
+                assert!(any_on, "GROOVE WORLD {} must load a non-empty groove", kit.id);
+            }
+        }
     }
 
     /// The real persistence path: program a bank, JSON round-trip the persisted

@@ -24,9 +24,6 @@ pub const DEFAULT_MACRO_LABELS: [&str; 8] =
 /// patch, the mod dests, and the mix. The recall path decodes each variant onto
 /// the matching `DrumKit` / plugin setter. A kit lists only what it touches;
 /// anything absent stays at the default.
-// allow(dead_code): only Neutral (empty rows) exists until chunk 3 adds the
-// factory worlds that construct these variants; `stage_kit` already reads them.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum KitRow {
     /// Per-voice tail patch default: `param` is a `LockableParam` index `0..5`
@@ -63,9 +60,11 @@ pub struct Kit {
     /// Read by the recall relabel in chunk 4.
     #[allow(dead_code)]
     pub macro_labels: [&'static str; 8],
-    /// `Some` for a GROOVE WORLD (recall memcpys it into the selected pattern
-    /// slot); `None` for a timbral KIT (leaves the user's pattern untouched).
-    pub pattern: Option<&'static Pattern>,
+    /// `Some` for a GROOVE WORLD — a builder run editor-side at recall, whose
+    /// `Pattern` is memcpy'd into the selected slot. `None` for a timbral KIT
+    /// (leaves the user's pattern untouched). A fn (not `&'static Pattern`) so a
+    /// groove is authored with the `set`-the-steps idiom, not a 64-step const.
+    pub pattern: Option<fn() -> Pattern>,
 }
 
 /// The Neutral anchor: no overrides, no pattern, default labels. Recalling it
@@ -80,9 +79,15 @@ pub static NEUTRAL: Kit = Kit {
     pattern: None,
 };
 
-/// The factory kit/world list, surfaced in the KITS page. Grows toward the
-/// flagship worlds (chunk 3) + a 50+ library.
-pub static FACTORY_KITS: &[&Kit] = &[&NEUTRAL];
+/// The factory kit/world list, surfaced in the KITS page: Neutral (the anchor)
+/// + the flagship GROOVE WORLDS. Grows toward a 50+ library.
+pub static FACTORY_KITS: &[&Kit] = &[
+    &NEUTRAL,
+    &crate::worlds::DISCOTHEQUE,
+    &crate::worlds::MARSEILLE,
+    &crate::worlds::BLADERUNNER,
+    &crate::worlds::OUTRUN,
+];
 
 #[cfg(test)]
 mod tests {
