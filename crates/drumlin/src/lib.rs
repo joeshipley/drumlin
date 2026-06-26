@@ -18,8 +18,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, O
 use std::sync::{Arc, Mutex};
 
 use percussion_core::{
-    track_for_note, DrumKit, LockableParam, ModEngine, Pattern, SeqState, Sequencer, TrigCondition,
-    VoiceMix, VoicePatch, MAX_STEPS, MAX_TRACKS, N_AUX, N_TAIL_PARAMS,
+    track_for_note, DrumKit, DrumModDest, DrumModMatrix, DrumModSlot, DrumModSource, LockableParam,
+    ModEngine, ModLfoShape, Pattern, SeqState, Sequencer, TrigCondition, VoiceMix, VoicePatch,
+    MAX_STEPS, MAX_TRACKS, N_AUX, N_TAIL_PARAMS,
 };
 
 const EDITOR_WIDTH: u32 = 1100;
@@ -53,6 +54,15 @@ enum SeqEdit {
     /// Per-voice MIX (channel-strip) value: `field` 0=Send A, 1=Send B, 2=mute,
     /// 3=solo, 4=gated_verb (bools as 0.0/1.0).
     SetVoiceMix { track: u8, field: u8, value: f32 },
+    /// Mod-matrix slot: `src`/`dst` are the source/dest indices, `depth` -1..1,
+    /// `voice` is 0xFF (all) or a track index.
+    SetModSlot { slot: u8, src: u16, dst: u16, depth: f32, voice: u8 },
+    /// LFO config (`idx` 0=LFO1, 1=LFO2): shape discriminant, rate Hz, depth, retrig.
+    SetLfo { idx: u8, shape: u8, rate: f32, depth: f32, retrig: bool },
+    /// Mod-env attack + decay (seconds).
+    SetModEnv { attack: f32, decay: f32 },
+    /// One macro knob (`idx` 0..7, `value` 0..1).
+    SetMacro { idx: u8, value: f32 },
 }
 
 /// JS -> Rust messages from the webview.
@@ -73,6 +83,10 @@ enum Action {
     Humanize { value: u8 },
     SetVoiceParam { track: u8, param: u16, value: f32 },
     SetVoiceMix { track: u8, field: u8, value: f32 },
+    SetModSlot { slot: u8, src: u16, dst: u16, depth: f32, voice: u8 },
+    SetLfo { idx: u8, shape: u8, rate: f32, depth: f32, retrig: bool },
+    SetModEnv { attack: f32, decay: f32 },
+    SetMacro { idx: u8, value: f32 },
     Transport { play: bool },
     SeqEnable { on: bool },
     SidechainEnable { on: bool },
@@ -129,6 +143,63 @@ struct DrumlinParams {
 
 /// The host-persisted song state: the pattern bank, the SEQ enable, and the
 /// per-voice patch (the VOICE editor's defaults).
+/// One LFO's persisted config. `shape` is the `ModLfoShape` discriminant
+/// (0=Sine, 1=Triangle, 2=Saw, 3=Square, 4=SampleHold).
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct LfoCfg {
+    shape: u8,
+    rate_hz: f32,
+    depth: f32,
+    retrig: bool,
+}
+
+/// The persisted M6 mod state: the 16-slot matrix + the 2 LFO configs + the
+/// mod-env (attack/decay) + the 8 macro knob values. Default = an all-Off matrix
+/// + the `ModEngine`'s default LFOs + macros 0 → fully inert (no modulation).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct ModState {
+    #[serde(default)]
+    matrix: DrumModMatrix,
+    #[serde(default = "ModState::default_lfo1")]
+    lfo1: LfoCfg,
+    #[serde(default = "ModState::default_lfo2")]
+    lfo2: LfoCfg,
+    #[serde(default = "ModState::default_env_attack")]
+    env_attack: f32,
+    #[serde(default = "ModState::default_env_decay")]
+    env_decay: f32,
+    #[serde(default)]
+    macros: [f32; 8],
+}
+
+impl ModState {
+    fn default_lfo1() -> LfoCfg {
+        LfoCfg { shape: 0, rate_hz: 2.0, depth: 1.0, retrig: false }
+    }
+    fn default_lfo2() -> LfoCfg {
+        LfoCfg { shape: 1, rate_hz: 5.0, depth: 1.0, retrig: false }
+    }
+    fn default_env_attack() -> f32 {
+        0.005
+    }
+    fn default_env_decay() -> f32 {
+        0.5
+    }
+}
+
+impl Default for ModState {
+    fn default() -> Self {
+        Self {
+            matrix: DrumModMatrix::default(),
+            lfo1: Self::default_lfo1(),
+            lfo2: Self::default_lfo2(),
+            env_attack: Self::default_env_attack(),
+            env_decay: Self::default_env_decay(),
+            macros: [0.0; 8],
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct PersistState {
     seq: SeqState,
@@ -137,6 +208,8 @@ struct PersistState {
     voices: VoicePatch,
     #[serde(default)]
     mix: VoiceMix,
+    #[serde(default)]
+    mod_state: ModState,
 }
 
 impl Default for PersistState {
@@ -146,6 +219,7 @@ impl Default for PersistState {
             seq_enabled: true,
             voices: VoicePatch::default(),
             mix: VoiceMix::default(),
+            mod_state: ModState::default(),
         }
     }
 }
@@ -219,6 +293,9 @@ pub struct Drumlin {
     mod_engine: ModEngine,
     /// Latched mod-wheel (CC1) value, `0..1`; pushed to the kit each block.
     mod_wheel: f32,
+    /// Current macro-knob values (K1–K8); mirrored from the persisted state and
+    /// pushed to the kit on edit + load.
+    macros: [f32; 8],
     /// Rising-edge tracker for `run` (sequencer playing), to fire the mod-env /
     /// retrigger LFOs on transport start.
     was_running: bool,
@@ -282,6 +359,7 @@ impl Default for Drumlin {
             seq: Sequencer::new(),
             mod_engine: ModEngine::new(48_000.0),
             mod_wheel: 0.0,
+            macros: [0.0; 8],
             was_running: false,
             internal_pos_qn: 0.0,
             was_internal_playing: false,
@@ -348,7 +426,18 @@ fn pattern_cells(p: &Pattern) -> Vec<serde_json::Value> {
 // length as the kit's N_AUX (the per-voice OUT picker routes 1..=N_AUX).
 const _: () = assert!(N_AUX == 4, "aux output port count must equal percussion_core::N_AUX");
 
-fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json::Value {
+/// Map a persisted LFO shape discriminant to the engine enum (unknown -> Sine).
+fn lfo_shape(i: u8) -> ModLfoShape {
+    match i {
+        1 => ModLfoShape::Triangle,
+        2 => ModLfoShape::Saw,
+        3 => ModLfoShape::Square,
+        4 => ModLfoShape::SampleHold,
+        _ => ModLfoShape::Sine,
+    }
+}
+
+fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix, mod_state: &ModState) -> serde_json::Value {
     let patterns: Vec<serde_json::Value> = seq
         .patterns
         .iter()
@@ -390,6 +479,14 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
             ]
         })
         .collect();
+    // The mod matrix: 16 slots as [src_index, dst_index, depth, target_voice].
+    let mod_slots: Vec<Vec<f32>> = mod_state
+        .matrix
+        .slots
+        .iter()
+        .map(|s| vec![s.src.index() as f32, s.dst.index() as f32, s.depth, f32::from(s.target_voice)])
+        .collect();
+    let lfo_json = |l: &LfoCfg| json!({ "shape": l.shape, "rate": l.rate_hz, "depth": l.depth, "retrig": l.retrig });
     json!({
         "type": "grid",
         "tracks": MAX_TRACKS,
@@ -397,6 +494,13 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
         "patterns": patterns,
         "voicepatch": voice_rows,
         "voicemix": mix_rows,
+        "mod": {
+            "slots": mod_slots,
+            "lfo1": lfo_json(&mod_state.lfo1),
+            "lfo2": lfo_json(&mod_state.lfo2),
+            "env": { "attack": mod_state.env_attack, "decay": mod_state.env_decay },
+            "macros": mod_state.macros,
+        },
     })
 }
 
@@ -504,7 +608,7 @@ impl Plugin for Drumlin {
                         // params + the SC toggle are host-persisted but the sliders
                         // are otherwise write-only.)
                         if let Ok(s) = params.state.lock() {
-                            let mut msg = bank_json(&s.seq, &s.voices, &s.mix);
+                            let mut msg = bank_json(&s.seq, &s.voices, &s.mix, &s.mod_state);
                             // Bus-FX slider values, normalized, in pget! id order 1..=9.
                             msg["busfx"] = json!([
                                 params.pump.unmodulated_normalized_value(),
@@ -572,6 +676,45 @@ impl Plugin for Drumlin {
                         if let Ok(mut s) = params.state.lock() {
                             if let Some(row) = s.mix.tracks.get_mut(track as usize) {
                                 row.set(field, value); // same mapping as the live kit
+                            }
+                        }
+                    }
+                    Action::SetModSlot { slot, src, dst, depth, voice } => {
+                        push_edit!(SeqEdit::SetModSlot { slot, src, dst, depth, voice });
+                        if let Ok(mut s) = params.state.lock() {
+                            if let Some(sl) = s.mod_state.matrix.slots.get_mut(slot as usize) {
+                                *sl = DrumModSlot {
+                                    src: DrumModSource::from_index(src as usize),
+                                    dst: DrumModDest::from_index(dst as usize),
+                                    depth: depth.clamp(-1.0, 1.0),
+                                    target_voice: voice,
+                                };
+                            }
+                        }
+                    }
+                    Action::SetLfo { idx, shape, rate, depth, retrig } => {
+                        push_edit!(SeqEdit::SetLfo { idx, shape, rate, depth, retrig });
+                        if let Ok(mut s) = params.state.lock() {
+                            let cfg = LfoCfg { shape, rate_hz: rate, depth, retrig };
+                            if idx == 0 {
+                                s.mod_state.lfo1 = cfg;
+                            } else {
+                                s.mod_state.lfo2 = cfg;
+                            }
+                        }
+                    }
+                    Action::SetModEnv { attack, decay } => {
+                        push_edit!(SeqEdit::SetModEnv { attack, decay });
+                        if let Ok(mut s) = params.state.lock() {
+                            s.mod_state.env_attack = attack;
+                            s.mod_state.env_decay = decay;
+                        }
+                    }
+                    Action::SetMacro { idx, value } => {
+                        push_edit!(SeqEdit::SetMacro { idx, value });
+                        if let Ok(mut s) = params.state.lock() {
+                            if let Some(m) = s.mod_state.macros.get_mut(idx as usize) {
+                                *m = value.clamp(0.0, 1.0);
                             }
                         }
                     }
@@ -646,6 +789,16 @@ impl Plugin for Drumlin {
             }
             self.kit.import_patch(&state.voices);
             self.kit.import_mix(&state.mix);
+            // Seed the mod matrix + LFO/env config + macros from the project.
+            let ms = &state.mod_state;
+            for (i, sl) in ms.matrix.slots.iter().enumerate() {
+                self.kit.set_mod_slot(i, sl.src, sl.dst, sl.depth, sl.target_voice);
+            }
+            self.mod_engine.set_lfo1(lfo_shape(ms.lfo1.shape), ms.lfo1.rate_hz, ms.lfo1.depth, ms.lfo1.retrig);
+            self.mod_engine.set_lfo2(lfo_shape(ms.lfo2.shape), ms.lfo2.rate_hz, ms.lfo2.depth, ms.lfo2.retrig);
+            self.mod_engine.set_mod_env(ms.env_attack, ms.env_decay);
+            self.macros = ms.macros;
+            self.kit.set_macros(self.macros);
         }
         true
     }
@@ -684,6 +837,40 @@ impl Plugin for Drumlin {
                 self.kit.set_voice_mix(track as usize, field, value);
                 continue;
             }
+            // Mod edits: apply to the live kit / mod-engine (sound); persistence
+            // is on the editor thread (Action::*). None of these dirty the seq.
+            match ed {
+                SeqEdit::SetModSlot { slot, src, dst, depth, voice } => {
+                    self.kit.set_mod_slot(
+                        slot as usize,
+                        DrumModSource::from_index(src as usize),
+                        DrumModDest::from_index(dst as usize),
+                        depth,
+                        voice,
+                    );
+                    continue;
+                }
+                SeqEdit::SetLfo { idx, shape, rate, depth, retrig } => {
+                    if idx == 0 {
+                        self.mod_engine.set_lfo1(lfo_shape(shape), rate, depth, retrig);
+                    } else {
+                        self.mod_engine.set_lfo2(lfo_shape(shape), rate, depth, retrig);
+                    }
+                    continue;
+                }
+                SeqEdit::SetModEnv { attack, decay } => {
+                    self.mod_engine.set_mod_env(attack, decay);
+                    continue;
+                }
+                SeqEdit::SetMacro { idx, value } => {
+                    if let Some(m) = self.macros.get_mut(idx as usize) {
+                        *m = value;
+                    }
+                    self.kit.set_macros(self.macros);
+                    continue;
+                }
+                _ => {}
+            }
             self.seq_dirty = true;
             match ed {
                 SeqEdit::SetStep { track, step, on } => {
@@ -716,7 +903,14 @@ impl Plugin for Drumlin {
                 SeqEdit::SelectPattern { idx } => self.seq.select_pattern(idx as usize),
                 SeqEdit::Swing { value } => self.seq.set_swing(value),
                 SeqEdit::Humanize { value } => self.seq.set_humanize(value),
-                SeqEdit::SetVoiceParam { .. } | SeqEdit::SetVoiceMix { .. } => {} // handled before the match
+                // All handled before this match (they `continue`); listed for
+                // exhaustiveness.
+                SeqEdit::SetVoiceParam { .. }
+                | SeqEdit::SetVoiceMix { .. }
+                | SeqEdit::SetModSlot { .. }
+                | SeqEdit::SetLfo { .. }
+                | SeqEdit::SetModEnv { .. }
+                | SeqEdit::SetMacro { .. } => {}
             }
         }
 
