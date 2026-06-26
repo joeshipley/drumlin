@@ -328,7 +328,7 @@ Reuse Esker's `ModMatrix` (16 slots) almost wholesale. Sources: 2 tempo-syncable
 
 ### 5.2 Per-voice mixer
 
-One channel strip per lane (MIX rail): fader, pan, mute/solo, Send A (reverb), Send B (delay), a 2-band trim EQ, choke-group selector, and an **output routing** picker — *Main bus* (default) or *Multi-out* (each voice to its own stereo pair, declared as auxiliary output ports so Logic/CLAP hosts can split kick/snare/hats to separate tracks).
+One channel strip per lane (MIX rail): fader, pan, mute/solo, Send A (reverb), Send B (delay), a 2-band trim EQ, choke-group selector, and an **output routing** picker — *Main bus* (default) or *Multi-out* (declared as auxiliary output ports so Logic/CLAP hosts can split kick/snare/hats to separate tracks). **As shipped (M8):** rather than one dedicated stereo pair per voice (12 ports — heavy for AU/auval), the OUT picker assigns each voice to *Main* or one of **4 shared aux stereo pairs** (M / 1–4). Raising the pool is a one-line change (`N_AUX` + the `aux_output_ports` literal).
 
 ### 5.3 The drum-BUS FX chain
 

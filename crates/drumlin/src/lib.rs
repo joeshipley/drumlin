@@ -333,6 +333,10 @@ fn pattern_cells(p: &Pattern) -> Vec<serde_json::Value> {
 /// persisted/live state, so the grid and VOICE editor the user sees always match
 /// what the engine will play. The patch is emitted **normalized** (0..1, the
 /// slider encoding) even though it's stored in engine units.
+// The AUDIO_IO_LAYOUTS aux_output_ports + aux_outputs literals must stay the same
+// length as the kit's N_AUX (the per-voice OUT picker routes 1..=N_AUX).
+const _: () = assert!(N_AUX == 4, "aux output port count must equal percussion_core::N_AUX");
+
 fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json::Value {
     let patterns: Vec<serde_json::Value> = seq
         .patterns
@@ -369,6 +373,7 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
                 f32::from(m.choke_group),
                 m.eq_low_norm(),
                 m.eq_high_norm(),
+                f32::from(m.output),
             ]
         })
         .collect();
@@ -481,9 +486,26 @@ impl Plugin for Drumlin {
                     Action::Init => {
                         // Seed the GUI from the persisted/live state so it shows
                         // exactly what the engine holds (incl. a restored project):
-                        // the pattern bank AND the per-voice patch.
+                        // the pattern bank, per-voice patch + mix, the bus-FX
+                        // slider positions, and the sidechain toggle. (The bus-FX
+                        // params + the SC toggle are host-persisted but the sliders
+                        // are otherwise write-only.)
                         if let Ok(s) = params.state.lock() {
-                            ctx.send_json(bank_json(&s.seq, &s.voices, &s.mix));
+                            let mut msg = bank_json(&s.seq, &s.voices, &s.mix);
+                            // Bus-FX slider values, normalized, in pget! id order 1..=9.
+                            msg["busfx"] = json!([
+                                params.pump.unmodulated_normalized_value(),
+                                params.bus_drive.unmodulated_normalized_value(),
+                                params.reverb.unmodulated_normalized_value(),
+                                params.delay.unmodulated_normalized_value(),
+                                params.pump_rate.unmodulated_normalized_value(),
+                                params.pump_curve.unmodulated_normalized_value(),
+                                params.parallel.unmodulated_normalized_value(),
+                                params.punch.unmodulated_normalized_value(),
+                                params.gate_time.unmodulated_normalized_value(),
+                            ]);
+                            msg["sidechain"] = json!(params.sidechain_key.value());
+                            ctx.send_json(msg);
                         }
                     }
                     Action::Note { on, note } => {

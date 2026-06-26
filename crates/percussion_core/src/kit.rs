@@ -485,7 +485,15 @@ impl DrumKit {
             let g = if m.mute || (self.any_solo && !m.solo) { 0.0 } else { 1.0 };
             let tl = tl * g;
             let tr = tr * g;
-            if m.output == 0 {
+            // output 0 = Main; 1..=N routes to aux[output-1] IF that stem exists.
+            // An out-of-range index (fewer aux buses than expected) falls back to
+            // Main rather than dropping the voice.
+            let stem_idx = if m.output == 0 { usize::MAX } else { (m.output - 1) as usize };
+            if let Some(stem) = aux.get_mut(stem_idx) {
+                // Stem: raw post-fader, out of the Main mix + its sends.
+                stem.0 += tl;
+                stem.1 += tr;
+            } else {
                 // Main bus: dry sum + the post-fader sends. Send A routes to the
                 // gated reverb when flagged gated_verb, else the normal reverb.
                 l += tl;
@@ -500,10 +508,6 @@ impl DrumKit {
                 }
                 s.delay_l += tl * m.send_b;
                 s.delay_r += tr * m.send_b;
-            } else if let Some(stem) = aux.get_mut((m.output - 1) as usize) {
-                // Stem: raw post-fader, out of the Main mix + its sends.
-                stem.0 += tl;
-                stem.1 += tr;
             }
         }
         self.bus.process_with_sends(l, r, s)
@@ -652,10 +656,11 @@ mod tests {
         k.export_mix_into(&mut exported);
         assert_eq!(exported, VoiceMix::default(), "default mix must round-trip to default");
 
-        // Set a send + mute, round-trip, confirm survival.
+        // Set a send + mute + solo + output routing, round-trip, confirm survival.
         k.set_voice_mix(2, 0, 0.6); // snare Send A
         k.set_voice_mix(5, 2, 1.0); // closed-hat mute
         k.set_voice_mix(0, 3, 1.0); // kick solo
+        k.set_voice_mix(2, 8, 3.0); // snare -> Aux 3 (output routing)
         let mut m = VoiceMix::default();
         k.export_mix_into(&mut m);
         let mut k2 = DrumKit::neutral(48_000.0);
@@ -663,6 +668,7 @@ mod tests {
         assert!((k2.voice_mix(2, 0) - 0.6).abs() < 1e-6, "send A survives");
         assert_eq!(k2.voice_mix(5, 2), 1.0, "mute survives");
         assert_eq!(k2.voice_mix(0, 3), 1.0, "solo survives");
+        assert_eq!(k2.voice_mix(2, 8), 3.0, "output routing survives");
     }
 
     #[test]

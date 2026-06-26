@@ -599,8 +599,18 @@
       // unconditionally so a panel opened before the seed lands repaints with
       // the real (non-uniform) per-track values, not the placeholder fallback.
       if (msg.voicepatch) { voiceVals = msg.voicepatch; buildVoice(); }
-      // Seed the MIX strips (sends + mute/solo).
+      // Seed the MIX strips (sends, mute/solo, choke, EQ, output routing).
       if (msg.voicemix) { mixVals = msg.voicemix; buildMix(); }
+      // Seed the BUS-FX sliders (write-only otherwise) from the persisted params.
+      if (msg.busfx) {
+        const ids = ["pump", "drive", "reverb", "delay", "pumprate", "pumpcurve", "parallel", "punch", "gatetime"];
+        ids.forEach((id, k) => {
+          const el = document.getElementById(id);
+          if (el && msg.busfx[k] != null) el.value = Math.round(msg.busfx[k] * 1000);
+        });
+      }
+      // Seed the sidechain (SC) toggle.
+      if ("sidechain" in msg) { scOn = !!msg.sidechain; scBtn.classList.toggle("on", scOn); }
     } else if (msg.type === "status") {
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";
