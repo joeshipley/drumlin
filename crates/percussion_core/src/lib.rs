@@ -36,7 +36,7 @@ pub use mod_matrix::{
     N_DRUM_SLOTS, N_DRUM_SOURCES,
 };
 pub use pitch_env::DahdEnv;
-pub use plock::{LockableParam, PLock, LOCKABLE_PARAMS, MAX_PLOCKS};
+pub use plock::{LockableParam, PLock, LOCKABLE_PARAMS, MAX_PLOCKS, N_TAIL_PARAMS};
 pub use resonator::Resonator;
 pub use rng::XorShift32;
 pub use sequencer::{GrooveTemplate, Pattern, SeqState, Sequencer, Step, Track, TrigCondition};

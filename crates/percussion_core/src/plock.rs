@@ -30,7 +30,23 @@ impl Default for PLock {
     }
 }
 
-/// The lockable per-voice tail parameters. Index = position; append-only.
+/// The lockable params that are per-voice **tail defaults** (indices
+/// `0..N_TAIL_PARAMS`: Level/Pan/Cutoff/Resonance/Drive). `Pitch`/`Decay` come
+/// after and are p-lock-only (no per-voice default), so `VoicePatch` sizes to
+/// this, NOT `LockableParam::COUNT` — keeping the persisted patch layout stable.
+pub const N_TAIL_PARAMS: usize = 5;
+
+/// Full-range pitch p-lock deviation in cents (±1 octave), unity at norm 0.5.
+const PITCH_LOCK_CENTS: f32 = 1200.0;
+/// Full-range decay p-lock in octaves of multiplicative scale (0.25x..4x), unity
+/// at norm 0.5 — the same range/shape as the AmpDecay mod destination.
+const DECAY_LOCK_OCT: f32 = 2.0;
+
+/// The lockable per-voice parameters. Index = position; **append-only** (a
+/// reconcile test pins index ↔ id). `Level..Drive` are tail params (resolved
+/// onto the `VoiceTail`); `Pitch`/`Decay` are *voice-engine* locks that route to
+/// the same hooks drift + the mod matrix use (a no-op on noise/fixed-partial
+/// voices like clap/rim).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockableParam {
     Level,
@@ -38,10 +54,12 @@ pub enum LockableParam {
     Cutoff,
     Resonance,
     Drive,
+    Pitch,
+    Decay,
 }
 
 impl LockableParam {
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 7;
 
     pub fn index(self) -> u16 {
         match self {
@@ -50,6 +68,8 @@ impl LockableParam {
             LockableParam::Cutoff => 2,
             LockableParam::Resonance => 3,
             LockableParam::Drive => 4,
+            LockableParam::Pitch => 5,
+            LockableParam::Decay => 6,
         }
     }
 
@@ -60,6 +80,8 @@ impl LockableParam {
             2 => Some(LockableParam::Cutoff),
             3 => Some(LockableParam::Resonance),
             4 => Some(LockableParam::Drive),
+            5 => Some(LockableParam::Pitch),
+            6 => Some(LockableParam::Decay),
             _ => None,
         }
     }
@@ -72,6 +94,8 @@ impl LockableParam {
             LockableParam::Cutoff => "cutoff",
             LockableParam::Resonance => "resonance",
             LockableParam::Drive => "drive",
+            LockableParam::Pitch => "pitch",
+            LockableParam::Decay => "decay",
         }
     }
 
@@ -82,6 +106,8 @@ impl LockableParam {
             "cutoff" => Some(LockableParam::Cutoff),
             "resonance" => Some(LockableParam::Resonance),
             "drive" => Some(LockableParam::Drive),
+            "pitch" => Some(LockableParam::Pitch),
+            "decay" => Some(LockableParam::Decay),
             _ => None,
         }
     }
@@ -95,6 +121,8 @@ impl LockableParam {
             LockableParam::Cutoff => 20.0 * 1000.0_f32.powf(n), // 20 Hz..20 kHz, log
             LockableParam::Resonance => n,                   // 0..1
             LockableParam::Drive => n,                       // 0..1
+            LockableParam::Pitch => (n - 0.5) * 2.0 * PITCH_LOCK_CENTS, // ±1200 cents, 0 at 0.5
+            LockableParam::Decay => 2.0_f32.powf((n - 0.5) * 2.0 * DECAY_LOCK_OCT), // 0.25x..4x, 1 at 0.5
         }
     }
 
@@ -108,6 +136,8 @@ impl LockableParam {
             LockableParam::Cutoff => (eng.max(1.0) / 20.0).ln() / 1000.0_f32.ln(),
             LockableParam::Resonance => eng,
             LockableParam::Drive => eng,
+            LockableParam::Pitch => eng / (2.0 * PITCH_LOCK_CENTS) + 0.5,
+            LockableParam::Decay => eng.max(1.0e-6).log2() / (2.0 * DECAY_LOCK_OCT) + 0.5,
         };
         v.clamp(0.0, 1.0)
     }
@@ -120,6 +150,8 @@ pub const LOCKABLE_PARAMS: [LockableParam; LockableParam::COUNT] = [
     LockableParam::Cutoff,
     LockableParam::Resonance,
     LockableParam::Drive,
+    LockableParam::Pitch,
+    LockableParam::Decay,
 ];
 
 #[cfg(test)]
@@ -147,7 +179,9 @@ mod tests {
         assert_eq!(LockableParam::from_index(2).unwrap().id(), "cutoff");
         assert_eq!(LockableParam::from_index(3).unwrap().id(), "resonance");
         assert_eq!(LockableParam::from_index(4).unwrap().id(), "drive");
-        assert_eq!(LockableParam::COUNT, 5);
+        assert_eq!(LockableParam::from_index(5).unwrap().id(), "pitch");
+        assert_eq!(LockableParam::from_index(6).unwrap().id(), "decay");
+        assert_eq!(LockableParam::COUNT, 7);
     }
 
     #[test]
@@ -157,6 +191,12 @@ mod tests {
         assert!((LockableParam::Level.denormalize(0.5) - 1.0).abs() < 1e-6);
         assert!((LockableParam::Cutoff.denormalize(0.0) - 20.0).abs() < 1e-3);
         assert!((LockableParam::Cutoff.denormalize(1.0) - 20_000.0).abs() < 1.0);
+        // Pitch + Decay are unity at the center (0.5) so a centered lock is a no-op.
+        assert!((LockableParam::Pitch.denormalize(0.5)).abs() < 1e-6, "centered pitch lock = 0 cents");
+        assert!((LockableParam::Pitch.denormalize(1.0) - 1200.0).abs() < 1e-3, "full pitch lock = +1 octave");
+        assert!((LockableParam::Decay.denormalize(0.5) - 1.0).abs() < 1e-6, "centered decay lock = unity");
+        assert!((LockableParam::Decay.denormalize(0.0) - 0.25).abs() < 1e-4, "min decay lock = 0.25x");
+        assert!((LockableParam::Decay.denormalize(1.0) - 4.0).abs() < 1e-4, "max decay lock = 4x");
     }
 
     #[test]

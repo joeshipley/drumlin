@@ -8,7 +8,7 @@
 use crate::bus::{BusSends, DrumBus};
 use crate::drift;
 use crate::mod_matrix::{DrumModDest, DrumModMatrix, DrumModSource, ModGlobals, N_DRUM_DESTS, N_DRUM_SOURCES};
-use crate::plock::{LockableParam, PLock};
+use crate::plock::{LockableParam, PLock, N_TAIL_PARAMS};
 use crate::tail::VoiceTail;
 use crate::voice::{
     ClapVoice, CowbellVoice, HatVoice, KickVoice, RimVoice, SnareVoice, TomVoice, Voice, ZapVoice,
@@ -38,14 +38,14 @@ struct TrackBase {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VoicePatch {
-    pub tracks: [[f32; LockableParam::COUNT]; MAX_TRACKS],
+    pub tracks: [[f32; N_TAIL_PARAMS]; MAX_TRACKS],
 }
 
 impl Default for VoicePatch {
     fn default() -> Self {
         // Derive from the Neutral kit so the defaults never drift from neutral().
         // (base[] is sample-rate independent, so any rate yields the same patch.)
-        let mut p = Self { tracks: [[0.0; LockableParam::COUNT]; MAX_TRACKS] };
+        let mut p = Self { tracks: [[0.0; N_TAIL_PARAMS]; MAX_TRACKS] };
         DrumKit::neutral(48_000.0).export_patch_into(&mut p);
         p
     }
@@ -232,6 +232,22 @@ impl ModTailOffsets {
     }
 }
 
+/// Scan a step's p-locks for the voice-engine locks (Pitch, Decay) and return
+/// `(pitch cents, decay scale)`. Absent or centered -> `(0.0, 1.0)`, a no-op.
+/// These route to the voice hooks, not the tail, so `apply_plocks` skips them.
+fn pitch_decay_plocks(plocks: &[PLock]) -> (f32, f32) {
+    let mut cents = 0.0;
+    let mut decay = 1.0;
+    for pl in plocks {
+        match LockableParam::from_index(pl.param) {
+            Some(LockableParam::Pitch) => cents = LockableParam::Pitch.denormalize(pl.value),
+            Some(LockableParam::Decay) => decay = LockableParam::Decay.denormalize(pl.value),
+            _ => {}
+        }
+    }
+    (cents, decay)
+}
+
 impl DrumKit {
     /// The Neutral kit — the bit-exact golden anchor (frozen at M3).
     pub fn neutral(sr: f32) -> Self {
@@ -370,12 +386,18 @@ impl DrumKit {
         // (set EVERY trigger so no stale detune lingers; 0 cents -> 2^0 = 1.0, a
         // bit-exact no-op). Level: drift's velocity scale (the matrix Level dest
         // is a tail VCA, already folded in apply_plocks).
+        // Pitch/Decay p-locks resolve to a per-hit voice offset (not the tail):
+        // Pitch in cents (summed with drift + the matrix), Decay a multiplicative
+        // scale (multiplied with the matrix AmpDecay). Centered locks (0 cents /
+        // unity) are no-ops, so an unlocked hit is bit-identical.
+        let (plock_cents, plock_decay) = pitch_decay_plocks(plocks);
+
         let drift = self.mix[track].drift;
         let drift_cents = hit.rand_pitch * drift * drift::PITCH_CENTS_FULL;
         let mod_cents = mod_acc
             .map(|a| a[DrumModDest::Pitch.index()] * DrumModDest::Pitch.scale())
             .unwrap_or(0.0);
-        self.voices[track].set_pitch_drift_cents(drift_cents + mod_cents);
+        self.voices[track].set_pitch_drift_cents(drift_cents + mod_cents + plock_cents);
 
         // AmpDecay: a multiplicative decay scale (octaves), `1.0` when unmodded.
         // Set every hit so a cleared route restores; the engine no-ops at 1.0.
@@ -388,7 +410,7 @@ impl DrumKit {
                 2.0_f32.powf(oct)
             })
             .unwrap_or(1.0);
-        self.voices[track].set_decay_mod(decay_scale);
+        self.voices[track].set_decay_mod(decay_scale * plock_decay);
 
         let mut velocity = hit.velocity;
         if drift != 0.0 {
@@ -478,6 +500,9 @@ impl DrumKit {
                         drive_amt = v;
                         drive_on = v > 0.001;
                     }
+                    // Pitch/Decay are voice-engine locks, not tail params — they
+                    // route to the voice hooks in trigger_impl, not here.
+                    LockableParam::Pitch | LockableParam::Decay => {}
                 }
             }
         }
@@ -542,6 +567,8 @@ impl DrumKit {
                 b.drive_amt = v;
                 b.drive_on = v > 0.001; // same threshold as apply_plocks
             }
+            // Pitch/Decay have no per-voice tail default (p-lock-only in v1).
+            LockableParam::Pitch | LockableParam::Decay => return,
         }
         self.seed_tail_from_base(track);
     }
@@ -587,6 +614,8 @@ impl DrumKit {
             LockableParam::Cutoff => b.cutoff,
             LockableParam::Resonance => b.resonance,
             LockableParam::Drive => b.drive_amt,
+            // Pitch/Decay have no per-voice default; report the unity center.
+            LockableParam::Pitch | LockableParam::Decay => return 0.5,
         };
         p.normalize(eng)
     }
@@ -831,7 +860,7 @@ mod tests {
     fn neutral_patch_round_trips_and_default_import_is_a_no_op() {
         // A fresh Neutral kit's exported patch equals VoicePatch::default()...
         let kit = DrumKit::neutral(48_000.0);
-        let mut exported = VoicePatch { tracks: [[0.0; LockableParam::COUNT]; MAX_TRACKS] };
+        let mut exported = VoicePatch { tracks: [[0.0; N_TAIL_PARAMS]; MAX_TRACKS] };
         kit.export_patch_into(&mut exported);
         assert_eq!(exported, VoicePatch::default(), "neutral export must equal the default patch");
 
@@ -1008,6 +1037,33 @@ mod tests {
         let shorter = tail_energy(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::AmpDecay, -1.0, ALL_VOICES), 0);
         assert!(longer > base * 1.5, "a +AmpDecay route must lengthen the tail (more late energy)");
         assert!(shorter < base * 0.5, "a -AmpDecay route must shorten the tail (less late energy)");
+    }
+
+    #[test]
+    fn pitch_and_decay_plocks_change_the_hit_and_center_is_a_no_op() {
+        use crate::plock::{LockableParam, PLock};
+        fn render_kick(plocks: &[PLock]) -> Vec<f32> {
+            let mut k = DrumKit::neutral(48_000.0);
+            k.trigger(0, 1.0, false, plocks);
+            (0..6_000).map(|_| k.render().0).collect()
+        }
+        let baseline = render_kick(&[]);
+
+        // Centered locks (norm 0.5) denormalize to unity -> byte-identical no-op.
+        let centered = render_kick(&[
+            PLock { param: LockableParam::Pitch.index(), value: 0.5 },
+            PLock { param: LockableParam::Decay.index(), value: 0.5 },
+        ]);
+        assert_eq!(centered, baseline, "centered pitch + decay locks must be a bit-exact no-op");
+
+        // A pitch lock shifts the pitch (changes the rendered hit).
+        let pitched = render_kick(&[PLock { param: LockableParam::Pitch.index(), value: 0.85 }]);
+        assert!(pitched != baseline, "a pitch p-lock must change the hit");
+
+        // A short decay lock collapses the tail.
+        let decayed = render_kick(&[PLock { param: LockableParam::Decay.index(), value: 0.0 }]);
+        let tail = |b: &[f32]| b[3_000..].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+        assert!(tail(&decayed) < tail(&baseline) * 0.5, "a short decay lock must shorten the tail");
     }
 
     #[test]

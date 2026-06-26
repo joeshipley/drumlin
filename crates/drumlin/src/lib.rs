@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use percussion_core::{
     track_for_note, DrumKit, LockableParam, Pattern, SeqState, Sequencer, TrigCondition, VoiceMix,
-    VoicePatch, MAX_STEPS, MAX_TRACKS, N_AUX,
+    VoicePatch, MAX_STEPS, MAX_TRACKS, N_AUX, N_TAIL_PARAMS,
 };
 
 const EDITOR_WIDTH: u32 = 1100;
@@ -350,10 +350,11 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
             })
         })
         .collect();
-    // 12 tracks x 5 params, normalized for the VOICE sliders.
+    // 12 tracks x 5 tail params, normalized for the VOICE sliders. (Pitch/Decay
+    // are p-lock-only, not per-voice defaults, so they're not in voice_rows.)
     let voice_rows: Vec<Vec<f32>> = (0..MAX_TRACKS)
         .map(|t| {
-            (0..LockableParam::COUNT)
+            (0..N_TAIL_PARAMS)
                 .map(|i| LockableParam::from_index(i as u16).unwrap().normalize(voices.tracks[t][i]))
                 .collect()
         })
@@ -545,7 +546,9 @@ impl Plugin for Drumlin {
                         push_edit!(SeqEdit::SetVoiceParam { track, param, value });
                         if let Some(p) = LockableParam::from_index(param) {
                             if let Ok(mut s) = params.state.lock() {
-                                if (track as usize) < MAX_TRACKS && (param as usize) < LockableParam::COUNT {
+                                // voices is the per-voice TAIL patch (N_TAIL_PARAMS
+                                // wide); Pitch/Decay are p-lock-only, not stored here.
+                                if (track as usize) < MAX_TRACKS && (param as usize) < N_TAIL_PARAMS {
                                     s.voices.tracks[track as usize][param as usize] = p.denormalize(value);
                                 }
                             }
