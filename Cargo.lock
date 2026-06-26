@@ -3108,7 +3108,7 @@ dependencies = [
 [[package]]
 name = "synth_core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/joeshipley/synth_core.git?rev=b8625f48745d04fae02beb043ece4f8db49c9209#b8625f48745d04fae02beb043ece4f8db49c9209"
+source = "git+ssh://git@github.com/joeshipley/synth_core.git?rev=1bc18075ca21a94e31beb8b3eb2de906d204724f#1bc18075ca21a94e31beb8b3eb2de906d204724f"
 
 [[package]]
 name = "system-deps"
