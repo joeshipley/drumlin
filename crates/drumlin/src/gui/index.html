@@ -72,7 +72,7 @@
   .voice-params { max-width: 480px; }
   .voice-hint { margin-top: 20px; max-width: 480px; font-size: 10px; color: var(--dim-3); line-height: 1.6; }
   .mix-wrap { flex: 1; padding: 16px 22px; overflow: auto; }
-  .mix-head, .mix-strip { display: grid; grid-template-columns: 64px 1fr 1fr 1fr 1fr 92px; gap: 12px; align-items: center; }
+  .mix-head, .mix-strip { display: grid; grid-template-columns: 60px 1fr 1fr 1fr 1fr 92px 40px; gap: 10px; align-items: center; }
   .mix-head { font-family: var(--mono); font-size: 7.5px; letter-spacing: 1px; color: var(--dim-3); margin-bottom: 8px; }
   .mix-head span { text-align: center; }
   .mix-head .mix-name { text-align: left; }
@@ -85,6 +85,8 @@
   .mix-btn.m.on { color: #1a1a1a; background: #d98c4a; border-color: #d98c4a; }
   .mix-btn.s.on { color: #1a1a1a; background: var(--accent); border-color: var(--accent); }
   .mix-btn.g.on { color: #1a1a1a; background: #6db0c4; border-color: #6db0c4; }
+  .mix-btn.chk { width: 30px; }
+  .mix-btn.chk.set { color: var(--accent); border-color: rgba(224,163,62,0.5); }
   .insp { width: 232px; flex: 0 0 232px; background: var(--panel-2); border-left: 1px solid var(--border); padding: 11px 12px; overflow-y: auto; font-size: 11px; }
   .insp h4 { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; margin: 12px 0 7px; }
   .insp h4:first-child { margin-top: 0; }
@@ -153,7 +155,7 @@
       </div>
       <div class="mix-wrap" id="mixView" style="display:none">
         <div class="voice-h">MIX · faders, sends &amp; mute/solo</div>
-        <div class="mix-head"><span class="mix-name"></span><span>LEVEL</span><span>PAN</span><span title="reverb send">SEND A</span><span title="delay send">SEND B</span><span class="mix-ms">M&nbsp;S&nbsp;G</span></div>
+        <div class="mix-head"><span class="mix-name"></span><span>LEVEL</span><span>PAN</span><span title="reverb send">SEND A</span><span title="delay send">SEND B</span><span class="mix-ms">M&nbsp;S&nbsp;G</span><span title="choke group">CHK</span></div>
         <div class="mix-strips" id="mixStrips"></div>
         <div class="voice-hint">LEVEL/PAN are the same per-track defaults as the VOICE page. SEND A → reverb, SEND B → delay. Saved with the project.</div>
       </div>
@@ -452,9 +454,10 @@
   function buildVoice() { buildVoiceTracks(); buildVoiceParams(); }
 
   // ---- MIX page (faders, sends, mute/solo) ----
-  // mixVals[track] = [sendA, sendB, mute, solo, gatedVerb], seeded from msg.voicemix.
-  // LEVEL/PAN reuse voiceVals (shared source of truth with the VOICE page).
-  let mixVals = Array.from({length: N_TRACKS}, () => [0, 0, 0, 0, 0]);
+  // mixVals[track] = [sendA, sendB, mute, solo, gatedVerb, chokeGroup], seeded
+  // from msg.voicemix. LEVEL/PAN reuse voiceVals (shared with the VOICE page).
+  let mixVals = Array.from({length: N_TRACKS}, () => [0, 0, 0, 0, 0, 0]);
+  const CHOKE_LABELS = ["—", "A", "B", "C", "D"];
   const mixStripsEl = document.getElementById("mixStrips");
   function mixSlider(val, oninput) {
     const r = document.createElement("input"); r.type = "range"; r.min = 0; r.max = 1000;
@@ -467,6 +470,20 @@
     b.className = "mix-btn " + cls + (active ? " on" : "");
     b.textContent = cls.toUpperCase();
     b.addEventListener("click", () => { const on = !b.classList.contains("on"); b.classList.toggle("on", on); ontoggle(on); });
+    return b;
+  }
+  function mixChoke(group, onchange) {
+    let g = group | 0;
+    const b = document.createElement("button");
+    b.className = "mix-btn chk" + (g ? " set" : "");
+    b.textContent = CHOKE_LABELS[g] || "—";
+    b.title = "Choke group (click to cycle)";
+    b.addEventListener("click", () => {
+      g = (g + 1) % 5;
+      b.textContent = CHOKE_LABELS[g];
+      b.classList.toggle("set", g !== 0);
+      onchange(g);
+    });
     return b;
   }
   function buildMix() {
@@ -490,6 +507,8 @@
       // G = gated-verb: route this voice's Send A to the gated reverb.
       ms.appendChild(mixToggle("g", mixVals[t][4] > 0.5, on => { mixVals[t][4] = on ? 1 : 0; send({ type: "set-voice-mix", track: t, field: 4, value: on ? 1 : 0 }); }));
       row.appendChild(ms);
+      // Choke group cycle selector (—/A/B/C/D).
+      row.appendChild(mixChoke(mixVals[t][5], g => { mixVals[t][5] = g; send({ type: "set-voice-mix", track: t, field: 5, value: g }); }));
       mixStripsEl.appendChild(row);
     });
   }

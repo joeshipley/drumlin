@@ -64,6 +64,10 @@ pub struct VoiceMixRow {
     /// the normal reverb return.
     #[cfg_attr(feature = "serde", serde(default))]
     pub gated_verb: bool,
+    /// Choke group: 0 = none, 1..=4 = groups A..D. Triggering a voice chokes
+    /// other sounding voices sharing its group (e.g. closed hat chokes open hat).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub choke_group: u8,
 }
 
 /// Below this, a send snaps to exactly 0.0 so the persisted value, the bus
@@ -73,9 +77,9 @@ const SEND_FLOOR: f32 = 0.0001;
 
 impl VoiceMixRow {
     /// Apply one MIX edit: `field` 0 = Send A, 1 = Send B, 2 = mute, 3 = solo,
-    /// 4 = gated_verb (bools as `> 0.5`). The single source of this mapping —
-    /// shared by the audio-thread kit update and the editor-thread persist write,
-    /// so they can't drift.
+    /// 4 = gated_verb (bools as `> 0.5`), 5 = choke_group (0..=4). The single
+    /// source of this mapping — shared by the audio-thread kit update and the
+    /// editor-thread persist write, so they can't drift.
     pub fn set(&mut self, field: u8, value: f32) {
         match field {
             0 => self.send_a = Self::snap_send(value),
@@ -83,6 +87,7 @@ impl VoiceMixRow {
             2 => self.mute = value > 0.5,
             3 => self.solo = value > 0.5,
             4 => self.gated_verb = value > 0.5,
+            5 => self.choke_group = value.clamp(0.0, 4.0).round() as u8,
             _ => {}
         }
     }
@@ -106,7 +111,12 @@ pub struct VoiceMix {
 
 impl Default for VoiceMix {
     fn default() -> Self {
-        Self { tracks: [VoiceMixRow::default(); MAX_TRACKS] }
+        // Derive from the Neutral kit so the default mix carries neutral()'s
+        // choke groups (closed+open hat = group 1). Otherwise an un-edited
+        // reload (which imports the default mix) would drop the hat choke.
+        let mut m = Self { tracks: [VoiceMixRow::default(); MAX_TRACKS] };
+        DrumKit::neutral(48_000.0).export_mix_into(&mut m);
+        m
     }
 }
 
@@ -116,15 +126,13 @@ impl Default for VoiceMix {
 pub struct DrumKit {
     voices: [Voice; MAX_TRACKS],
     tails: [VoiceTail; MAX_TRACKS],
-    /// 0 = no group; 1..=4 = groups A..D. A trigger chokes other sounding
-    /// voices sharing its group.
-    choke_group: [u8; MAX_TRACKS],
     /// Per-track default tail params (the p-lock restore target).
     base: [TrackBase; MAX_TRACKS],
     /// Whether a track's tail currently holds a p-lock override (so an unlocked
     /// hit knows to restore the base). Keeps unlocked playback byte-identical.
     tail_dirty: [bool; MAX_TRACKS],
-    /// Per-track MIX state (sends + mute/solo). Level/Pan stay in `base[]`.
+    /// Per-track MIX state (sends, mute/solo, gated-verb, choke group). Level/Pan
+    /// stay in `base[]`; the choke group lives here so it's editable + persisted.
     mix: [VoiceMixRow; MAX_TRACKS],
     /// Cached "is any track soloed?" so `render` needn't scan 12 tracks/sample.
     any_solo: bool,
@@ -173,9 +181,10 @@ impl DrumKit {
         tails[10].set_pan(0.3);
         tails[11].set_level(0.6); // SAMPLE / FX
 
-        let mut choke_group = [0u8; MAX_TRACKS];
-        choke_group[5] = 1; // closed hat -> group A
-        choke_group[6] = 1; // open hat   -> group A (closed chokes open)
+        // Choke groups live in the MIX state now (editable + persisted).
+        let mut mix = [VoiceMixRow::default(); MAX_TRACKS];
+        mix[5].choke_group = 1; // closed hat -> group A
+        mix[6].choke_group = 1; // open hat   -> group A (closed chokes open)
 
         // Capture each track's configured tail values as the p-lock restore base.
         let base: [TrackBase; MAX_TRACKS] = core::array::from_fn(|t| TrackBase {
@@ -190,10 +199,9 @@ impl DrumKit {
         Self {
             voices,
             tails,
-            choke_group,
             base,
             tail_dirty: [false; MAX_TRACKS],
-            mix: [VoiceMixRow::default(); MAX_TRACKS],
+            mix,
             any_solo: false,
             bus: DrumBus::neutral(sr),
             sr,
@@ -222,10 +230,10 @@ impl DrumKit {
             return;
         }
         self.apply_plocks(track, plocks);
-        let g = self.choke_group[track];
+        let g = self.mix[track].choke_group;
         if g != 0 {
             for i in 0..MAX_TRACKS {
-                if i != track && self.choke_group[i] == g {
+                if i != track && self.mix[i].choke_group == g {
                     self.voices[i].choke();
                 }
             }
@@ -391,6 +399,7 @@ impl DrumKit {
             2 => f32::from(m.mute),
             3 => f32::from(m.solo),
             4 => f32::from(m.gated_verb),
+            5 => f32::from(m.choke_group),
             _ => 0.0,
         }
     }
@@ -595,6 +604,24 @@ mod tests {
         assert_eq!(k.voice_mix(0, 0), 0.0, "a sub-threshold send must snap to exactly 0");
         k.set_voice_mix(0, 0, 0.5);
         assert!((k.voice_mix(0, 0) - 0.5).abs() < 1e-6, "a real send is kept");
+    }
+
+    #[test]
+    fn choke_group_assignment_round_trips_and_keeps_neutral_hats() {
+        let mut k = DrumKit::neutral(48_000.0);
+        // The neutral hat choke (closed+open = group 1) is now MIX state.
+        assert_eq!(k.voice_mix(5, 5), 1.0, "closed hat in group 1");
+        assert_eq!(k.voice_mix(6, 5), 1.0, "open hat in group 1");
+        assert_eq!(k.voice_mix(0, 5), 0.0, "kick ungrouped by default");
+        // Assigning a group works and exports for persistence.
+        k.set_voice_mix(0, 5, 2.0);
+        assert_eq!(k.voice_mix(0, 5), 2.0);
+        let mut m = VoiceMix::default();
+        k.export_mix_into(&mut m);
+        assert_eq!(m.tracks[0].choke_group, 2);
+        assert_eq!(m.tracks[5].choke_group, 1, "neutral hat choke preserved on export");
+        // The default mix carries the neutral hat choke (so an un-edited reload keeps it).
+        assert_eq!(VoiceMix::default().tracks[5].choke_group, 1);
     }
 
     #[test]

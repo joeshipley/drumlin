@@ -343,7 +343,7 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
                 .collect()
         })
         .collect();
-    // 12 tracks x [sendA, sendB, mute, solo, gatedVerb] for the MIX strips.
+    // 12 tracks x [sendA, sendB, mute, solo, gatedVerb, chokeGroup] for the MIX strips.
     let mix_rows: Vec<Vec<f32>> = mix
         .tracks
         .iter()
@@ -354,6 +354,7 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
                 f32::from(m.mute),
                 f32::from(m.solo),
                 f32::from(m.gated_verb),
+                f32::from(m.choke_group),
             ]
         })
         .collect();
