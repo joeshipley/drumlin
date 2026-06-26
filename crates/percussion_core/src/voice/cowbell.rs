@@ -18,6 +18,7 @@ pub struct CowbellVoice {
     amp: DahdEnv,
     accent_amt: f32,
     gain: f32,
+    drift_cents: f32,
 }
 
 impl CowbellVoice {
@@ -35,6 +36,7 @@ impl CowbellVoice {
             amp: DahdEnv::new(sr),
             accent_amt: 0.5,
             gain: 1.0,
+            drift_cents: 0.0,
         };
         v.apply();
         v
@@ -56,9 +58,18 @@ impl CowbellVoice {
         self.apply();
     }
 
+    pub fn set_pitch_drift_cents(&mut self, cents: f32) {
+        self.drift_cents = cents;
+    }
+
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
         self.phase1 = 0.0;
         self.phase2 = 0.0;
+        // Re-derive the increments with this hit's drift (ratio 1.0 at 0 cents
+        // reproduces the setup values exactly).
+        let r = crate::drift::cents_to_ratio(self.drift_cents);
+        self.inc1 = (self.base_hz * r / self.sr).clamp(0.0, 0.49);
+        self.inc2 = (self.base_hz * self.ratio * r / self.sr).clamp(0.0, 0.49);
         self.hp.reset(); // start each hit from a clean filter state
         self.amp.trigger();
         let acc = if accent { 1.0 + self.accent_amt } else { 1.0 };

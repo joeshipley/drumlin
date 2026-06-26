@@ -15,6 +15,7 @@ pub struct HatVoice {
     hp_hz: f32,
     accent_amt: f32,
     gain: f32,
+    drift_cents: f32,
 }
 
 impl HatVoice {
@@ -31,6 +32,7 @@ impl HatVoice {
             hp_hz,
             accent_amt: 0.5,
             gain: 1.0,
+            drift_cents: 0.0,
         };
         v.amp.set_params(0.2, 0.0, decay_ms);
         v
@@ -61,7 +63,14 @@ impl HatVoice {
         self.amp.set_params(0.2, 0.0, self.decay_ms);
     }
 
+    pub fn set_pitch_drift_cents(&mut self, cents: f32) {
+        self.drift_cents = cents;
+    }
+
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
+        // Drift retunes the metal cluster (set_tune(1.0) == stock, so 0 cents is
+        // bit-exact). Set every hit so a stale tune can't linger when DRIFT = 0.
+        self.cluster.set_tune(crate::drift::cents_to_ratio(self.drift_cents));
         self.cluster.trigger();
         self.amp.trigger();
         let acc = if accent { 1.0 + self.accent_amt } else { 1.0 };

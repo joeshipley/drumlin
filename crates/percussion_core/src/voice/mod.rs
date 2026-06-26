@@ -67,6 +67,21 @@ impl Voice {
         }
     }
 
+    /// Per-hit pitch drift, in cents (set just before `trigger`). Pitched voices
+    /// fold it into their frequency; clap (noise) and rim (fixed-partial, v1) are
+    /// no-ops. `0.0` is a bit-exact no-op (ratio `2^(0/1200) = 1.0`).
+    pub fn set_pitch_drift_cents(&mut self, cents: f32) {
+        match self {
+            Voice::Kick(v) => v.set_pitch_drift_cents(cents),
+            Voice::Snare(v) => v.set_pitch_drift_cents(cents),
+            Voice::Hat(v) => v.set_pitch_drift_cents(cents),
+            Voice::Tom(v) => v.set_pitch_drift_cents(cents),
+            Voice::Cowbell(v) => v.set_pitch_drift_cents(cents),
+            Voice::Zap(v) => v.set_pitch_drift_cents(cents),
+            Voice::Clap(_) | Voice::Rim(_) | Voice::Silent => {}
+        }
+    }
+
     pub fn render(&mut self) -> (f32, f32) {
         match self {
             Voice::Kick(v) => v.render(),

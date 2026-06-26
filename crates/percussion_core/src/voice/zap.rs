@@ -14,6 +14,7 @@ pub struct ZapVoice {
     pitch_amount_st: f32,
     accent_amt: f32,
     gain: f32,
+    drift_cents: f32,
 }
 
 impl ZapVoice {
@@ -31,6 +32,7 @@ impl ZapVoice {
             pitch_amount_st: 24.0, // sweeps down ~2 octaves -> "zap"
             accent_amt: 0.5,
             gain: 1.0,
+            drift_cents: 0.0,
         };
         v.apply();
         v
@@ -49,6 +51,10 @@ impl ZapVoice {
         self.apply();
     }
 
+    pub fn set_pitch_drift_cents(&mut self, cents: f32) {
+        self.drift_cents = cents;
+    }
+
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
         self.osc.reset();
         self.pitch.trigger();
@@ -59,7 +65,9 @@ impl ZapVoice {
 
     pub fn render(&mut self) -> (f32, f32) {
         let st = self.pitch_amount_st * self.pitch.next();
-        let hz = (self.base_hz * 2.0_f32.powf(st / 12.0)).clamp(1.0, 0.45 * self.sr);
+        // Drift folds into the pitch exponent (one powf; bit-exact at 0 cents).
+        let hz = (self.base_hz * 2.0_f32.powf(st / 12.0 + self.drift_cents / 1200.0))
+            .clamp(1.0, 0.45 * self.sr);
         self.osc.set_frequency(hz);
         let s = self.osc.next_sample() * self.amp.next() * self.gain;
         (s, s)

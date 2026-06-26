@@ -60,7 +60,12 @@ fn render_pattern_oneshot() -> Vec<u8> {
         let mut ti = 0;
         for i in 0..n {
             while ti < trigs.len() && trigs[ti].offset as usize <= i {
-                kit.trigger(trigs[ti].track as usize, trigs[ti].velocity, trigs[ti].accent, trigs[ti].plocks());
+                // Render through the exact production sequencer path (incl. the
+                // seeded drift randoms). All tracks default to drift = 0, so this
+                // is byte-identical to a no-drift trigger — which is the point:
+                // the byte-exact golden now also guards the drift=0 no-op.
+                let t = trigs[ti];
+                kit.trigger_seq(t.track as usize, t.velocity, t.accent, t.plocks(), t.rand_pitch, t.rand_level);
                 ti += 1;
             }
             let (l, r) = kit.render();

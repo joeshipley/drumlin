@@ -19,6 +19,7 @@ pub struct TomVoice {
     amp_decay_ms: f32,
     accent_amt: f32,
     gain: f32,
+    drift_cents: f32,
 }
 
 impl TomVoice {
@@ -41,6 +42,7 @@ impl TomVoice {
             amp_decay_ms,
             accent_amt: 0.5,
             gain: 1.0,
+            drift_cents: 0.0,
         };
         v.apply();
         v
@@ -70,6 +72,10 @@ impl TomVoice {
         self.apply();
     }
 
+    pub fn set_pitch_drift_cents(&mut self, cents: f32) {
+        self.drift_cents = cents;
+    }
+
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
         self.osc.reset();
         self.shell.reset();
@@ -82,7 +88,9 @@ impl TomVoice {
 
     pub fn render(&mut self) -> (f32, f32) {
         let st = self.pitch_amount_st * self.pitch.next();
-        let hz = (self.base_hz * 2.0_f32.powf(st / 12.0)).clamp(1.0, 0.45 * self.sr);
+        // Drift folds into the pitch exponent (one powf; bit-exact at 0 cents).
+        let hz = (self.base_hz * 2.0_f32.powf(st / 12.0 + self.drift_cents / 1200.0))
+            .clamp(1.0, 0.45 * self.sr);
         self.osc.set_frequency(hz);
         let body = self.osc.next_sample() * self.amp.next();
         let exc = self.noise.next(NoiseType::White) * self.exciter.next() * 0.4;

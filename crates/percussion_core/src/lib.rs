@@ -12,6 +12,7 @@
 
 pub mod bus;
 pub mod clap_diffuser;
+pub mod drift;
 pub mod kit;
 pub mod metal_cluster;
 pub mod pitch_env;
@@ -60,6 +61,11 @@ pub struct Trigger {
     /// Per-step parameter locks applied to this hit only.
     pub plocks: [plock::PLock; plock::MAX_PLOCKS],
     pub plock_count: u8,
+    /// Seeded per-hit drift randoms, bipolar `-1..1` (pitch, level), from the
+    /// sequencer's GROOVE-LOCK RNG. The kit scales them by the voice's DRIFT
+    /// amount; `0.0` (the default / live hits) = no drift.
+    pub rand_pitch: f32,
+    pub rand_level: f32,
 }
 
 impl Trigger {

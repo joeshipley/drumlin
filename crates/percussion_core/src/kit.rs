@@ -6,6 +6,7 @@
 //! are `Silent` until M4.
 
 use crate::bus::{BusSends, DrumBus};
+use crate::drift;
 use crate::plock::{LockableParam, PLock};
 use crate::tail::VoiceTail;
 use crate::voice::{
@@ -76,6 +77,10 @@ pub struct VoiceMixRow {
     /// Output routing: 0 = Main bus (default), 1..=N_AUX = an aux stem pair.
     #[cfg_attr(feature = "serde", serde(default))]
     pub output: u8,
+    /// Analog-drift amount, 0..1 (0 = off): scales the seeded per-hit pitch +
+    /// level wander applied at trigger.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub drift: f32,
 }
 
 /// Number of auxiliary stereo stem outputs (the per-voice "output" picker targets
@@ -109,6 +114,7 @@ impl VoiceMixRow {
             6 => self.eq_low_db = (value.clamp(0.0, 1.0) - 0.5) * 2.0 * EQ_DB_RANGE,
             7 => self.eq_high_db = (value.clamp(0.0, 1.0) - 0.5) * 2.0 * EQ_DB_RANGE,
             8 => self.output = value.clamp(0.0, N_AUX as f32).round() as u8,
+            9 => self.drift = value.clamp(0.0, 1.0),
             _ => {}
         }
     }
@@ -254,9 +260,37 @@ impl DrumKit {
         self.bus.set_sample_rate(sr);
     }
 
-    /// Trigger a track. Applies any per-step parameter locks to the tail, the
-    /// choke broadcast (allocation-free, O(12)), then triggers the voice.
+    /// Trigger a track with no analog drift (live MIDI/pad hits, tests, goldens).
     pub fn trigger(&mut self, track: usize, velocity: f32, accent: bool, plocks: &[PLock]) {
+        self.trigger_impl(track, velocity, accent, plocks, 0.0, 0.0);
+    }
+
+    /// Trigger a sequencer hit, applying seeded per-hit analog **drift**:
+    /// `rand_pitch`/`rand_level` are the bipolar `-1..1` per-cell randoms; the
+    /// voice's DRIFT amount scales them into a pitch (±cents) + level (±%) wander.
+    pub fn trigger_seq(
+        &mut self,
+        track: usize,
+        velocity: f32,
+        accent: bool,
+        plocks: &[PLock],
+        rand_pitch: f32,
+        rand_level: f32,
+    ) {
+        self.trigger_impl(track, velocity, accent, plocks, rand_pitch, rand_level);
+    }
+
+    /// Applies any per-step parameter locks to the tail, the choke broadcast
+    /// (allocation-free, O(12)), drift (if any), then triggers the voice.
+    fn trigger_impl(
+        &mut self,
+        track: usize,
+        velocity: f32,
+        accent: bool,
+        plocks: &[PLock],
+        rand_pitch: f32,
+        rand_level: f32,
+    ) {
         if track >= MAX_TRACKS {
             return;
         }
@@ -268,6 +302,19 @@ impl DrumKit {
                     self.voices[i].choke();
                 }
             }
+        }
+        // Analog drift: scale the seeded per-hit randoms by the voice's amount.
+        // Pitch is set EVERY trigger (0 cents when undrifted) so a voice can't
+        // keep a stale detune after DRIFT is turned back down; ratio 2^(0/1200) =
+        // 1.0 makes that a bit-exact no-op. Level is gated so an undrifted hit
+        // passes its velocity through byte-for-byte unchanged.
+        let drift = self.mix[track].drift;
+        let cents = rand_pitch * drift * drift::PITCH_CENTS_FULL;
+        self.voices[track].set_pitch_drift_cents(cents);
+        let mut velocity = velocity;
+        if drift != 0.0 {
+            let level_mult = 1.0 + rand_level * drift * drift::LEVEL_PCT_FULL;
+            velocity = (velocity * level_mult).clamp(0.0, 1.0);
         }
         self.voices[track].trigger(velocity, accent);
     }
@@ -440,6 +487,7 @@ impl DrumKit {
             6 => m.eq_low_norm(),
             7 => m.eq_high_norm(),
             8 => f32::from(m.output),
+            9 => m.drift,
             _ => 0.0,
         }
     }
@@ -661,6 +709,7 @@ mod tests {
         k.set_voice_mix(5, 2, 1.0); // closed-hat mute
         k.set_voice_mix(0, 3, 1.0); // kick solo
         k.set_voice_mix(2, 8, 3.0); // snare -> Aux 3 (output routing)
+        k.set_voice_mix(0, 9, 0.7); // kick drift amount
         let mut m = VoiceMix::default();
         k.export_mix_into(&mut m);
         let mut k2 = DrumKit::neutral(48_000.0);
@@ -669,6 +718,65 @@ mod tests {
         assert_eq!(k2.voice_mix(5, 2), 1.0, "mute survives");
         assert_eq!(k2.voice_mix(0, 3), 1.0, "solo survives");
         assert_eq!(k2.voice_mix(2, 8), 3.0, "output routing survives");
+        assert!((k2.voice_mix(0, 9) - 0.7).abs() < 1e-6, "drift amount survives");
+    }
+
+    #[test]
+    fn drift_changes_the_hit_but_is_a_no_op_at_zero() {
+        // Render N samples of a freshly-triggered voice.
+        fn render_kick(k: &mut DrumKit, rand_pitch: f32, rand_level: f32) -> Vec<f32> {
+            k.trigger_seq(0, 1.0, false, &[], rand_pitch, rand_level);
+            (0..2_000).map(|_| k.render().0).collect()
+        }
+
+        // drift = 0: the seeded randoms are ignored — identical to no drift at all.
+        let mut undrifted = DrumKit::neutral(48_000.0);
+        let baseline = render_kick(&mut undrifted, 0.9, -0.8);
+        let mut plain = DrumKit::neutral(48_000.0);
+        plain.trigger(0, 1.0, false, &[]);
+        let plain_buf: Vec<f32> = (0..2_000).map(|_| plain.render().0).collect();
+        assert_eq!(baseline, plain_buf, "drift=0 must ignore the randoms (byte-identical to no drift)");
+
+        // drift > 0 with a nonzero pitch random: the hit must actually change.
+        let mut drifted = DrumKit::neutral(48_000.0);
+        drifted.set_voice_mix(0, 9, 1.0);
+        let moved = render_kick(&mut drifted, 0.9, 0.0);
+        assert!(moved != baseline, "drift>0 with a pitch random must change the hit");
+
+        // Seeded => deterministic: same amount + same randoms => bit-identical.
+        let mut again = DrumKit::neutral(48_000.0);
+        again.set_voice_mix(0, 9, 1.0);
+        let moved2 = render_kick(&mut again, 0.9, 0.0);
+        assert_eq!(moved, moved2, "same drift + same randoms must reproduce exactly");
+    }
+
+    #[test]
+    fn drift_clears_when_turned_back_to_zero() {
+        // After a drifted hit, turning DRIFT to 0 must NOT leave a stale detune.
+        // Both kits share an IDENTICAL drifted hit 1 (so identical bus/tail state
+        // — the confound), and differ only in how hit 2 clears: `k` sets DRIFT=0,
+        // the reference keeps DRIFT>0 but feeds zero randoms (a clearing path
+        // immune to any future re-gating of the pitch setter). A lingering stale
+        // detune would make hit 2 differ.
+        fn drifted_hit1(k: &mut DrumKit) {
+            k.set_voice_mix(0, 9, 1.0);
+            k.trigger_seq(0, 1.0, false, &[], 0.9, 0.0);
+            for _ in 0..2_000 {
+                k.render();
+            }
+        }
+        let mut k = DrumKit::neutral(48_000.0);
+        drifted_hit1(&mut k);
+        k.set_voice_mix(0, 9, 0.0); // DRIFT off
+        k.trigger_seq(0, 1.0, false, &[], 0.9, 0.0); // big random, but amount 0
+        let after: Vec<f32> = (0..2_000).map(|_| k.render().0).collect();
+
+        let mut reference = DrumKit::neutral(48_000.0);
+        drifted_hit1(&mut reference);
+        reference.trigger_seq(0, 1.0, false, &[], 0.0, 0.0); // amount 1, zero randoms => undrifted
+        let ref_after: Vec<f32> = (0..2_000).map(|_| reference.render().0).collect();
+
+        assert_eq!(after, ref_after, "a stale drift detune must not linger after DRIFT=0");
     }
 
     #[test]

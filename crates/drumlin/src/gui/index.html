@@ -74,7 +74,7 @@
   .voice-params { max-width: 480px; }
   .voice-hint { margin-top: 20px; max-width: 480px; font-size: 10px; color: var(--dim-3); line-height: 1.6; }
   .mix-wrap { flex: 1; padding: 16px 22px; overflow: auto; }
-  .mix-head, .mix-strip { display: grid; grid-template-columns: 52px 1fr 1fr 1fr 1fr 1fr 1fr 88px 34px 34px; gap: 8px; align-items: center; }
+  .mix-head, .mix-strip { display: grid; grid-template-columns: 52px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 88px 34px 34px; gap: 8px; align-items: center; }
   .mix-head { font-family: var(--mono); font-size: 7.5px; letter-spacing: 1px; color: var(--dim-3); margin-bottom: 8px; }
   .mix-head span { text-align: center; }
   .mix-head .mix-name { text-align: left; }
@@ -157,7 +157,7 @@
       </div>
       <div class="mix-wrap" id="mixView" style="display:none">
         <div class="voice-h">MIX · faders, sends &amp; mute/solo</div>
-        <div class="mix-head"><span class="mix-name"></span><span>LEVEL</span><span>PAN</span><span title="reverb send">SEND A</span><span title="delay send">SEND B</span><span title="low-shelf EQ">EQ LO</span><span title="high-shelf EQ">EQ HI</span><span class="mix-ms">M&nbsp;S&nbsp;G</span><span title="choke group">CHK</span><span title="output: Main / Aux 1-4">OUT</span></div>
+        <div class="mix-head"><span class="mix-name"></span><span>LEVEL</span><span>PAN</span><span title="reverb send">SEND A</span><span title="delay send">SEND B</span><span title="low-shelf EQ">EQ LO</span><span title="high-shelf EQ">EQ HI</span><span title="analog drift: seeded per-hit pitch + level wander">DRIFT</span><span class="mix-ms">M&nbsp;S&nbsp;G</span><span title="choke group">CHK</span><span title="output: Main / Aux 1-4">OUT</span></div>
         <div class="mix-strips" id="mixStrips"></div>
         <div class="voice-hint">LEVEL/PAN are the same per-track defaults as the VOICE page. SEND A → reverb, SEND B → delay. Saved with the project.</div>
       </div>
@@ -459,11 +459,12 @@
   function buildVoice() { buildVoiceTracks(); buildVoiceParams(); }
 
   // ---- MIX page (faders, sends, mute/solo) ----
-  // mixVals[track] = [sendA, sendB, mute, solo, gatedVerb, chokeGroup], seeded
-  // from msg.voicemix. LEVEL/PAN reuse voiceVals (shared with the VOICE page).
+  // mixVals[track] = [sendA, sendB, mute, solo, gatedVerb, chokeGroup, eqLo,
+  // eqHi, output, drift], seeded from msg.voicemix. LEVEL/PAN reuse voiceVals
+  // (shared with the VOICE page).
   // [sendA, sendB, mute, solo, gatedVerb, chokeGroup, eqLow, eqHigh]; EQ defaults
   // to 0.5 (flat).
-  let mixVals = Array.from({length: N_TRACKS}, () => [0, 0, 0, 0, 0, 0, 0.5, 0.5, 0]);
+  let mixVals = Array.from({length: N_TRACKS}, () => [0, 0, 0, 0, 0, 0, 0.5, 0.5, 0, 0]);
   const CHOKE_LABELS = ["—", "A", "B", "C", "D"];
   const OUTPUT_LABELS = ["M", "1", "2", "3", "4"]; // Main, Aux 1-4
   const mixStripsEl = document.getElementById("mixStrips");
@@ -530,6 +531,8 @@
       // EQ LO / HI shelves (0.5 = flat; double-click resets to flat).
       row.appendChild(mixSlider(mixVals[t][6] ?? 0.5, v => { mixVals[t][6] = v; send({ type: "set-voice-mix", track: t, field: 6, value: v }); }, 0.5));
       row.appendChild(mixSlider(mixVals[t][7] ?? 0.5, v => { mixVals[t][7] = v; send({ type: "set-voice-mix", track: t, field: 7, value: v }); }, 0.5));
+      // DRIFT (0 = off): seeded per-hit pitch + level wander. Double-click resets to 0.
+      row.appendChild(mixSlider(mixVals[t][9] ?? 0, v => { mixVals[t][9] = v; send({ type: "set-voice-mix", track: t, field: 9, value: v }); }, 0));
       const ms = document.createElement("div"); ms.className = "mix-ms";
       // Mute/solo change the effective-gate of other rows, so repaint the page.
       ms.appendChild(mixToggle("m", mixVals[t][2] > 0.5, on => { mixVals[t][2] = on ? 1 : 0; send({ type: "set-voice-mix", track: t, field: 2, value: on ? 1 : 0 }); buildMix(); }));

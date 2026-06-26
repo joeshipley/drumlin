@@ -374,6 +374,7 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix) -> serde_json:
                 m.eq_low_norm(),
                 m.eq_high_norm(),
                 f32::from(m.output),
+                m.drift,
             ]
         })
         .collect();
@@ -813,7 +814,16 @@ impl Plugin for Drumlin {
                 if trg.offset as usize > i {
                     break;
                 }
-                self.kit.trigger(trg.track as usize, trg.velocity, trg.accent, trg.plocks());
+                // Sequencer hits carry seeded per-hit analog drift (live pad/MIDI
+                // hits above use plain `trigger`, i.e. no drift).
+                self.kit.trigger_seq(
+                    trg.track as usize,
+                    trg.velocity,
+                    trg.accent,
+                    trg.plocks(),
+                    trg.rand_pitch,
+                    trg.rand_level,
+                );
                 ti += 1;
             }
 

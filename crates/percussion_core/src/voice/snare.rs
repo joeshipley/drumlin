@@ -20,6 +20,7 @@ pub struct SnareVoice {
     noise_level: f32,
     accent_amt: f32,
     gain: f32,
+    drift_cents: f32,
 }
 
 impl SnareVoice {
@@ -45,14 +46,17 @@ impl SnareVoice {
             noise_level: 0.7,
             accent_amt: 0.5,
             gain: 1.0,
+            drift_cents: 0.0,
         };
         v.apply();
         v
     }
 
     fn apply(&mut self) {
-        self.tone1.set_frequency(self.tune);
-        self.tone2.set_frequency(self.tune * self.tone2_ratio);
+        // Drift detunes both tones together (ratio = 1.0 at 0 cents -> no-op).
+        let r = crate::drift::cents_to_ratio(self.drift_cents);
+        self.tone1.set_frequency(self.tune * r);
+        self.tone2.set_frequency(self.tune * self.tone2_ratio * r);
         self.tone_env.set_params(0.3, 0.0, 110.0);
         self.noise_env.set_params(0.3, 0.0, 180.0);
     }
@@ -66,6 +70,10 @@ impl SnareVoice {
         self.noise_hp.set_sample_rate(sr);
         self.noise_hp.set_cutoff(1700.0);
         self.apply();
+    }
+
+    pub fn set_pitch_drift_cents(&mut self, cents: f32) {
+        self.drift_cents = cents;
     }
 
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
