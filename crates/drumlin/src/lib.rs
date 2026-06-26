@@ -8,6 +8,8 @@
 //! a live, editable step grid in the PRISM webview. The per-voice tail, bus FX,
 //! mod matrix and KITS arrive at M3+. See `docs/drumlin-plan.md`.
 
+mod kits;
+
 use nih_plug::prelude::*;
 use nih_plug_webview::{HTMLSource, WebViewEditor};
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -501,6 +503,11 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix, mod_state: &Mo
             "env": { "attack": mod_state.env_attack, "decay": mod_state.env_decay },
             "macros": mod_state.macros,
         },
+        // The factory KITS / GROOVE WORLDS for the KITS page (id + name + blurb +
+        // whether it carries a pattern). Recall is wired in chunk 2.
+        "kits": kits::FACTORY_KITS.iter().map(|k| json!({
+            "id": k.id, "name": k.name, "blurb": k.blurb, "world": k.pattern.is_some(),
+        })).collect::<Vec<_>>(),
     })
 }
 
