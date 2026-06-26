@@ -75,6 +75,7 @@ enum Action {
     SetVoiceMix { track: u8, field: u8, value: f32 },
     Transport { play: bool },
     SeqEnable { on: bool },
+    SidechainEnable { on: bool },
     // Automatable param gestures (id: 0=gain, 1=pump, 2=bus_drive).
     ParamBegin { id: u8 },
     ParamSet { id: u8, value: f32 },
@@ -112,6 +113,10 @@ struct DrumlinParams {
     /// Gated-verb gate length (hold), ms.
     #[id = "gate_time"]
     gate_time: FloatParam,
+    /// Use the host sidechain (aux input) as the PUMP key instead of the internal
+    /// kick. Default off -> internal kick, so the bus is unchanged.
+    #[id = "sidechain"]
+    sidechain_key: BoolParam,
 
     /// Out-of-band state the host can't reach through plain params: the full
     /// pattern bank (steps, p-locks, grooves) and the SEQ master-enable.
@@ -197,6 +202,7 @@ impl Default for DrumlinParams {
             gate_time: FloatParam::new("Gate Time", 120.0, FloatRange::Linear { min: 20.0, max: 400.0 })
                 .with_unit(" ms")
                 .with_value_to_string(formatters::v2s_f32_rounded(0)),
+            sidechain_key: BoolParam::new("Sidechain Key", false),
             state: Arc::new(Mutex::new(PersistState::default())),
         }
     }
@@ -386,7 +392,8 @@ impl Plugin for Drumlin {
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: None,
         main_output_channels: NonZeroU32::new(2),
-        aux_input_ports: &[],
+        // One stereo aux input: the host sidechain key for the PUMP (auval-validated).
+        aux_input_ports: &[new_nonzero_u32(2)],
         // Four stereo aux pairs for per-voice stems (each voice's MIX "output"
         // picker targets Main or one of these). auval-validated (5 output buses).
         aux_output_ports: &[
@@ -399,7 +406,7 @@ impl Plugin for Drumlin {
             layout: None,
             main_input: None,
             main_output: Some("Output"),
-            aux_inputs: &[],
+            aux_inputs: &["Sidechain"],
             aux_outputs: &["Aux 1", "Aux 2", "Aux 3", "Aux 4"],
         },
     }];
@@ -533,6 +540,11 @@ impl Plugin for Drumlin {
                     }
                     Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
                     Action::SeqEnable { on } => seq_enabled.store(on, Ordering::Relaxed),
+                    Action::SidechainEnable { on } => {
+                        setter.begin_set_parameter(&params.sidechain_key);
+                        setter.set_parameter(&params.sidechain_key, on);
+                        setter.end_set_parameter(&params.sidechain_key);
+                    }
                     Action::ParamBegin { id } => setter.begin_set_parameter(pget!(id)),
                     Action::ParamSet { id, value } => {
                         setter.set_parameter_normalized(pget!(id), value.clamp(0.0, 1.0))
@@ -715,6 +727,8 @@ impl Plugin for Drumlin {
         self.kit.set_bus_parallel(self.params.parallel.value());
         self.kit.set_bus_transient(self.params.punch.value());
         self.kit.set_gate_time(self.params.gate_time.value());
+        let sidechain = self.params.sidechain_key.value();
+        self.kit.set_pump_source_external(sidechain);
         let host_playing = transport.playing;
         let internal_playing = self.internal_play.load(Ordering::Relaxed);
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);
@@ -779,6 +793,18 @@ impl Plugin for Drumlin {
                 }
                 self.kit.trigger(trg.track as usize, trg.velocity, trg.accent, trg.plocks());
                 ti += 1;
+            }
+
+            // Feed the host sidechain key to the PUMP (only when enabled; an
+            // unconnected input reads as silence -> no duck).
+            if sidechain {
+                let key = aux.inputs.first().map_or(0.0, |b| {
+                    let ch = b.as_slice_immutable();
+                    let kl = ch.first().and_then(|c| c.get(i)).copied().unwrap_or(0.0);
+                    let kr = ch.get(1).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
+                    kl.abs().max(kr.abs())
+                });
+                self.kit.set_pump_key(key);
             }
 
             let (l, r) = self.kit.render_into(&mut self.aux_scratch);

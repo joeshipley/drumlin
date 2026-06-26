@@ -575,6 +575,16 @@ impl DrumKit {
         self.bus.set_gate_time(ms);
     }
 
+    /// Pump source: `true` = host sidechain key, `false` = internal kick.
+    pub fn set_pump_source_external(&mut self, external: bool) {
+        self.bus.set_pump_source_external(external);
+    }
+
+    /// Feed the external sidechain key level for this sample.
+    pub fn set_pump_key(&mut self, level: f32) {
+        self.bus.set_pump_key(level);
+    }
+
     /// Live pump duck gain (1.0 = open) for the GUI pump meter.
     pub fn pump_envelope(&self) -> f32 {
         self.bus.pump_envelope()

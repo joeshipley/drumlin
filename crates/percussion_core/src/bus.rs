@@ -79,8 +79,9 @@ pub struct DrumBus {
     sr: f32,
     tempo: f32,
     pump: f32,
-    pump_rate: f32,  // normalized -> PUMP_RATE_BEATS division
-    pump_curve: f32, // duck shape, 0..1
+    pump_rate: f32,    // normalized -> PUMP_RATE_BEATS division
+    pump_curve: f32,   // duck shape, 0..1
+    pump_external: bool, // true = duck from the host sidechain key, else IntKick
     drive: f32,
     transient_amt: f32, // PUNCH, 0..1 -> attack emphasis
     parallel_amt: f32,  // 0 = dry, 1 = full NY blend added under the bus
@@ -111,6 +112,7 @@ impl DrumBus {
             pump: 0.0,
             pump_rate: 0.5,  // 1/4 note — the original duck
             pump_curve: 0.5, // the original duck shape
+            pump_external: false,
             drive: 0.0,
             transient_amt: 0.0,
             parallel_amt: 0.0,
@@ -156,10 +158,28 @@ impl DrumBus {
 
     fn apply_pump(&mut self) {
         // rate -> note division (factory center = 1/4); curve -> duck shape.
+        // External = duck from the host sidechain; else the internal kick.
         let beats = pump_rate_beats(self.pump_rate);
         let division = (60.0 / self.tempo.max(1.0)) * beats;
-        self.comp
-            .set_pump(self.pump, PumpSource::IntKick, division, self.pump_curve, 0.0);
+        let source = if self.pump_external {
+            PumpSource::External
+        } else {
+            PumpSource::IntKick
+        };
+        self.comp.set_pump(self.pump, source, division, self.pump_curve, 0.0);
+    }
+
+    /// Select the pump source: `true` = host sidechain key (`set_pump_key`),
+    /// `false` = internal kick (the default).
+    pub fn set_pump_source_external(&mut self, external: bool) {
+        self.pump_external = external;
+        self.apply_pump();
+    }
+
+    /// Feed the external sidechain key level for this sample (used when the pump
+    /// source is External).
+    pub fn set_pump_key(&mut self, level: f32) {
+        self.comp.set_pump_key(level);
     }
 
     fn apply_drive(&mut self) {

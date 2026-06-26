@@ -31,6 +31,8 @@
   .pump { color: var(--accent); border-color: rgba(224,163,62,0.5); display: flex; gap: 6px; align-items: center; font-weight: 600; }
   .duck { width: 26px; height: 5px; background: var(--track); border-radius: 3px; overflow: hidden; }
   .duck .duckfill { display: block; height: 100%; width: 0%; background: var(--accent); box-shadow: 0 0 6px var(--accent); transition: width 30ms linear; }
+  .scbtn { margin-left: 7px; font-family: var(--mono); font-size: 8px; letter-spacing: 0.5px; color: var(--dim); background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 6px; cursor: default; }
+  .scbtn.on { color: #1a1a1a; background: var(--accent); border-color: var(--accent); }
   .slid { display: flex; align-items: center; gap: 6px; }
   input[type=range] { -webkit-appearance: none; height: 3px; background: var(--track); border-radius: 2px; outline: none; }
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); cursor: pointer; }
@@ -133,7 +135,7 @@
       <div class="chip slid">HM <input type="range" id="human" min="0" max="100" value="0" style="width:48px"><b id="humanv">0</b></div>
       <div class="spacer"></div>
       <div class="pats" id="pats"></div>
-      <div class="chip pump" title="Sidechain pump — the French-house duck (beat-synced)">PUMP <input type="range" id="pump" min="0" max="1000" value="0" style="width:56px"><span class="duck"><span class="duckfill" id="duckfill"></span></span></div>
+      <div class="chip pump" title="Sidechain pump — the French-house duck (beat-synced)">PUMP <input type="range" id="pump" min="0" max="1000" value="0" style="width:56px"><span class="duck"><span class="duckfill" id="duckfill"></span></span><button class="scbtn" id="scbtn" title="Sidechain key: duck from the host aux input instead of the internal kick">SC</button></div>
     </div>
 
     <div class="band">
@@ -411,6 +413,9 @@
   paramSlider(8, document.getElementById("punch"));
   paramSlider(9, document.getElementById("gatetime"));
   const duckfill = document.getElementById("duckfill");
+  const scBtn = document.getElementById("scbtn");
+  let scOn = false;
+  scBtn.addEventListener("click", () => { scOn = !scOn; scBtn.classList.toggle("on", scOn); send({ type: "sidechain-enable", on: scOn }); });
 
   // ---- pads ----
   const padsEl = document.getElementById("pads");
