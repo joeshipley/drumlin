@@ -19,6 +19,7 @@ pub struct CowbellVoice {
     accent_amt: f32,
     gain: f32,
     drift_cents: f32,
+    decay_scale: f32,
 }
 
 impl CowbellVoice {
@@ -37,6 +38,7 @@ impl CowbellVoice {
             accent_amt: 0.5,
             gain: 1.0,
             drift_cents: 0.0,
+            decay_scale: 1.0,
         };
         v.apply();
         v
@@ -48,7 +50,15 @@ impl CowbellVoice {
         self.inc2 = (self.base_hz * self.ratio / self.sr).clamp(0.0, 0.49);
         self.hp.set_cutoff(self.hp_hz);
         self.hp.set_resonance(0.1);
-        self.amp.set_params(0.3, 2.0, 280.0);
+        self.amp.set_params(0.3, 2.0, 280.0 * self.decay_scale);
+    }
+
+    /// Per-hit AmpDecay mod (1.0 = no mod). No-op when unchanged -> bit-exact.
+    pub fn set_decay_mod(&mut self, scale: f32) {
+        if scale != self.decay_scale {
+            self.decay_scale = scale;
+            self.apply();
+        }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {

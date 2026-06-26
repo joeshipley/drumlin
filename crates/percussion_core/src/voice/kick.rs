@@ -20,6 +20,8 @@ pub struct KickVoice {
     accent_amt: f32,
     gain: f32,
     drift_cents: f32,
+    /// Multiplicative AmpDecay mod scale (1.0 = no mod). Folded into `apply_envs`.
+    decay_scale: f32,
 }
 
 impl KickVoice {
@@ -43,6 +45,7 @@ impl KickVoice {
             accent_amt: 0.5,
             gain: 1.0,
             drift_cents: 0.0,
+            decay_scale: 1.0,
         };
         v.apply_envs();
         v
@@ -61,9 +64,19 @@ impl KickVoice {
     }
 
     fn apply_envs(&mut self) {
-        self.amp.set_params(0.5, 3.0, self.amp_decay_ms);
+        self.amp.set_params(0.5, 3.0, self.amp_decay_ms * self.decay_scale);
         self.pitch.set_params(0.0, 0.0, 45.0); // fast 909 pitch drop
         self.click_env.set_params(0.0, 0.0, 2.5); // 2.5 ms knock
+    }
+
+    /// Per-hit AmpDecay modulation: scale the amp decay (1.0 = no mod). A no-op
+    /// when unchanged, so an unmodulated voice never re-derives its env and stays
+    /// bit-identical; re-baking only happens when the scale actually moves.
+    pub fn set_decay_mod(&mut self, scale: f32) {
+        if scale != self.decay_scale {
+            self.decay_scale = scale;
+            self.apply_envs();
+        }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {

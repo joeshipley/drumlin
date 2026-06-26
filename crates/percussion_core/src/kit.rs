@@ -377,6 +377,19 @@ impl DrumKit {
             .unwrap_or(0.0);
         self.voices[track].set_pitch_drift_cents(drift_cents + mod_cents);
 
+        // AmpDecay: a multiplicative decay scale (octaves), `1.0` when unmodded.
+        // Set every hit so a cleared route restores; the engine no-ops at 1.0.
+        // Clamp the octaves to the documented +/-2 (0.25x..4x) so stacked routes
+        // can't drive the decay to a runaway / stuck tail (every other dest is
+        // range-clamped too — Cutoff at its Hz bounds, Level/Pan/Res/Drive below).
+        let decay_scale = mod_acc
+            .map(|a| {
+                let oct = (a[DrumModDest::AmpDecay.index()] * DrumModDest::AmpDecay.scale()).clamp(-2.0, 2.0);
+                2.0_f32.powf(oct)
+            })
+            .unwrap_or(1.0);
+        self.voices[track].set_decay_mod(decay_scale);
+
         let mut velocity = hit.velocity;
         if drift != 0.0 {
             let level_mult = 1.0 + hit.rand_level * drift * drift::LEVEL_PCT_FULL;
@@ -976,6 +989,25 @@ mod tests {
         empty.trigger(0, 1.0, false, &[]);
         let b: Vec<f32> = (0..2_000).map(|_| empty.render().0).collect();
         assert_eq!(a, b, "a route targeting voice 5 must leave voice 0 byte-identical");
+    }
+
+    #[test]
+    fn ampdecay_route_shortens_and_lengthens_the_tail() {
+        use crate::mod_matrix::{DrumModDest, DrumModSource, ALL_VOICES};
+        // Energy in the tail of a hit (samples well after onset), per voice.
+        fn tail_energy(setup: impl FnOnce(&mut DrumKit), track: usize) -> f64 {
+            let mut k = DrumKit::neutral(48_000.0);
+            setup(&mut k);
+            k.trigger(track, 1.0, false, &[]);
+            let buf: Vec<f32> = (0..6_000).map(|_| k.render().0).collect();
+            buf[3_000..].iter().map(|&s| (s as f64) * (s as f64)).sum()
+        }
+        // Trigger source (= 1.0) -> AmpDecay. +depth lengthens (4x), -depth shortens.
+        let base = tail_energy(|_| {}, 0);
+        let longer = tail_energy(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::AmpDecay, 1.0, ALL_VOICES), 0);
+        let shorter = tail_energy(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::AmpDecay, -1.0, ALL_VOICES), 0);
+        assert!(longer > base * 1.5, "a +AmpDecay route must lengthen the tail (more late energy)");
+        assert!(shorter < base * 0.5, "a -AmpDecay route must shorten the tail (less late energy)");
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub struct TomVoice {
     accent_amt: f32,
     gain: f32,
     drift_cents: f32,
+    decay_scale: f32,
 }
 
 impl TomVoice {
@@ -27,8 +28,7 @@ impl TomVoice {
         let mut osc = Oscillator::new(sr);
         osc.waveform = Waveform::Sine;
         let mut shell = Resonator::new(sr);
-        shell.set_count(1);
-        shell.set_partial(0, base_hz * 1.5, amp_decay_ms * 0.8, 0.5);
+        shell.set_count(1); // the partial is baked in apply() so AmpDecay scales it too
         let mut v = Self {
             sr,
             osc,
@@ -43,6 +43,7 @@ impl TomVoice {
             accent_amt: 0.5,
             gain: 1.0,
             drift_cents: 0.0,
+            decay_scale: 1.0,
         };
         v.apply();
         v
@@ -58,8 +59,19 @@ impl TomVoice {
 
     fn apply(&mut self) {
         self.pitch.set_params(0.0, 0.0, 60.0);
-        self.amp.set_params(0.5, 2.0, self.amp_decay_ms);
+        // Body amp env + shell ring both scale with AmpDecay (uniform decay mod);
+        // at decay_scale = 1.0 both reproduce the baked value bit-exactly.
+        self.amp.set_params(0.5, 2.0, self.amp_decay_ms * self.decay_scale);
+        self.shell.set_partial(0, self.base_hz * 1.5, self.amp_decay_ms * 0.8 * self.decay_scale, 0.5);
         self.exciter.set_params(0.0, 0.0, 5.0);
+    }
+
+    /// Per-hit AmpDecay mod (1.0 = no mod). No-op when unchanged -> bit-exact.
+    pub fn set_decay_mod(&mut self, scale: f32) {
+        if scale != self.decay_scale {
+            self.decay_scale = scale;
+            self.apply();
+        }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {

@@ -298,7 +298,7 @@ impl DrumModDest {
             DrumModDest::Level => 1.0,       // linear gain offset
             DrumModDest::NoiseLevel => 1.0,
             DrumModDest::ToneLevel => 1.0,
-            DrumModDest::AmpDecay => 1.0,    // fraction; the apply maps to a scale
+            DrumModDest::AmpDecay => 2.0,    // octaves; full depth = 0.25x..4x decay
             DrumModDest::Pan => 1.0,         // L..R
             DrumModDest::SampleStart => 1.0, // reserved
             DrumModDest::LayerMix => 1.0,    // reserved

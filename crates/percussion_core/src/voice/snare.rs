@@ -21,6 +21,7 @@ pub struct SnareVoice {
     accent_amt: f32,
     gain: f32,
     drift_cents: f32,
+    decay_scale: f32,
 }
 
 impl SnareVoice {
@@ -47,6 +48,7 @@ impl SnareVoice {
             accent_amt: 0.5,
             gain: 1.0,
             drift_cents: 0.0,
+            decay_scale: 1.0,
         };
         v.apply();
         v
@@ -57,8 +59,17 @@ impl SnareVoice {
         let r = crate::drift::cents_to_ratio(self.drift_cents);
         self.tone1.set_frequency(self.tune * r);
         self.tone2.set_frequency(self.tune * self.tone2_ratio * r);
-        self.tone_env.set_params(0.3, 0.0, 110.0);
-        self.noise_env.set_params(0.3, 0.0, 180.0);
+        // AmpDecay scales the snare's overall decay (both the tone + noise tails).
+        self.tone_env.set_params(0.3, 0.0, 110.0 * self.decay_scale);
+        self.noise_env.set_params(0.3, 0.0, 180.0 * self.decay_scale);
+    }
+
+    /// Per-hit AmpDecay mod (1.0 = no mod). No-op when unchanged -> bit-exact.
+    pub fn set_decay_mod(&mut self, scale: f32) {
+        if scale != self.decay_scale {
+            self.decay_scale = scale;
+            self.apply();
+        }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {

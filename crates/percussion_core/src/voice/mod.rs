@@ -82,6 +82,22 @@ impl Voice {
         }
     }
 
+    /// Per-hit AmpDecay modulation: a multiplicative scale on the amp decay
+    /// (`1.0` = no mod, a bit-exact no-op via each engine's unchanged-scale
+    /// guard). Clap + rim (decay lives in the diffuser/resonator) are no-ops.
+    pub fn set_decay_mod(&mut self, scale: f32) {
+        match self {
+            Voice::Kick(v) => v.set_decay_mod(scale),
+            Voice::Snare(v) => v.set_decay_mod(scale),
+            Voice::Hat(v) => v.set_decay_mod(scale),
+            Voice::Tom(v) => v.set_decay_mod(scale),
+            Voice::Cowbell(v) => v.set_decay_mod(scale),
+            Voice::Zap(v) => v.set_decay_mod(scale),
+            // Clap (diffuser) + rim (resonator) decay is not a single env -> v1 no-op.
+            Voice::Clap(_) | Voice::Rim(_) | Voice::Silent => {}
+        }
+    }
+
     pub fn render(&mut self) -> (f32, f32) {
         match self {
             Voice::Kick(v) => v.render(),

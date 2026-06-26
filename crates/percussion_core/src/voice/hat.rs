@@ -16,6 +16,7 @@ pub struct HatVoice {
     accent_amt: f32,
     gain: f32,
     drift_cents: f32,
+    decay_scale: f32,
 }
 
 impl HatVoice {
@@ -33,9 +34,15 @@ impl HatVoice {
             accent_amt: 0.5,
             gain: 1.0,
             drift_cents: 0.0,
+            decay_scale: 1.0,
         };
-        v.amp.set_params(0.2, 0.0, decay_ms);
+        v.bake_amp();
         v
+    }
+
+    /// Bake the amp env decay (folding the AmpDecay mod scale; 1.0 = baked value).
+    fn bake_amp(&mut self) {
+        self.amp.set_params(0.2, 0.0, self.decay_ms * self.decay_scale);
     }
 
     /// Tight closed hat.
@@ -60,11 +67,19 @@ impl HatVoice {
         self.hp.set_sample_rate(sr);
         self.hp.set_cutoff(self.hp_hz);
         self.amp.set_sample_rate(sr);
-        self.amp.set_params(0.2, 0.0, self.decay_ms);
+        self.bake_amp();
     }
 
     pub fn set_pitch_drift_cents(&mut self, cents: f32) {
         self.drift_cents = cents;
+    }
+
+    /// Per-hit AmpDecay mod (1.0 = no mod). No-op when unchanged -> bit-exact.
+    pub fn set_decay_mod(&mut self, scale: f32) {
+        if scale != self.decay_scale {
+            self.decay_scale = scale;
+            self.bake_amp();
+        }
     }
 
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
