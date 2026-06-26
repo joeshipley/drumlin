@@ -27,7 +27,7 @@ mod golden;
 
 pub use bus::DrumBus;
 pub use clap_diffuser::ClapDiffuser;
-pub use kit::{track_for_note, DrumKit, VoiceMix, VoiceMixRow, VoicePatch};
+pub use kit::{track_for_note, DrumKit, VoiceMix, VoiceMixRow, VoicePatch, N_AUX};
 pub use metal_cluster::MetalCluster;
 pub use pitch_env::DahdEnv;
 pub use plock::{LockableParam, PLock, LOCKABLE_PARAMS, MAX_PLOCKS};

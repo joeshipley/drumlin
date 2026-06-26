@@ -73,7 +73,15 @@ pub struct VoiceMixRow {
     pub eq_low_db: f32,
     #[cfg_attr(feature = "serde", serde(default))]
     pub eq_high_db: f32,
+    /// Output routing: 0 = Main bus (default), 1..=N_AUX = an aux stem pair.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub output: u8,
 }
+
+/// Number of auxiliary stereo stem outputs (the per-voice "output" picker targets
+/// Main or one of these). Kept small + host/auval-friendly; matches the plugin's
+/// declared aux output ports.
+pub const N_AUX: usize = 4;
 
 /// Trim-EQ shelf gain range: a normalized `0..1` slider maps to ±`EQ_DB_RANGE`.
 const EQ_DB_RANGE: f32 = 12.0;
@@ -100,6 +108,7 @@ impl VoiceMixRow {
             // EQ: normalized 0..1 slider (0.5 = flat) -> ±EQ_DB_RANGE dB.
             6 => self.eq_low_db = (value.clamp(0.0, 1.0) - 0.5) * 2.0 * EQ_DB_RANGE,
             7 => self.eq_high_db = (value.clamp(0.0, 1.0) - 0.5) * 2.0 * EQ_DB_RANGE,
+            8 => self.output = value.clamp(0.0, N_AUX as f32).round() as u8,
             _ => {}
         }
     }
@@ -430,6 +439,7 @@ impl DrumKit {
             5 => f32::from(m.choke_group),
             6 => m.eq_low_norm(),
             7 => m.eq_high_norm(),
+            8 => f32::from(m.output),
             _ => 0.0,
         }
     }
@@ -449,11 +459,21 @@ impl DrumKit {
         self.recompute_mix_flags();
     }
 
-    /// Sum all voices through their tails (with mute/solo gain), accumulating the
-    /// post-fader **Send A** (reverb) and **Send B** (delay) sums, then run the
-    /// glue/limiter bus with those sends. At the default (gain 1.0, sends 0) this
-    /// is bit-identical to a bare voice sum into the bus.
+    /// Render the Main stereo bus with no aux stems (the golden + bare path).
     pub fn render(&mut self) -> (f32, f32) {
+        self.render_into(&mut [])
+    }
+
+    /// Sum the voices through their tails (with mute/solo gain) into the Main bus
+    /// + the reverb/delay send sums, OR — for a voice whose `output` targets an
+    /// aux pair — into `aux[output-1]` (a RAW post-fader stem that bypasses the
+    /// shared glue/limiter and leaves the Main mix + its sends). Returns the Main
+    /// bus frame. At the default (all `output == 0`, gain 1.0, sends 0) this is
+    /// bit-identical to a bare voice sum into the bus, and the aux slice stays 0.
+    pub fn render_into(&mut self, aux: &mut [(f32, f32)]) -> (f32, f32) {
+        for a in aux.iter_mut() {
+            *a = (0.0, 0.0);
+        }
         let mut l = 0.0;
         let mut r = 0.0;
         let mut s = BusSends::default();
@@ -465,20 +485,26 @@ impl DrumKit {
             let g = if m.mute || (self.any_solo && !m.solo) { 0.0 } else { 1.0 };
             let tl = tl * g;
             let tr = tr * g;
-            l += tl;
-            r += tr;
-            // post-fader/mute sends. Send A routes to the gated reverb when the
-            // voice is flagged gated_verb, else the normal reverb.
-            let (sa_l, sa_r) = (tl * m.send_a, tr * m.send_a);
-            if m.gated_verb {
-                s.gated_l += sa_l;
-                s.gated_r += sa_r;
-            } else {
-                s.reverb_l += sa_l;
-                s.reverb_r += sa_r;
+            if m.output == 0 {
+                // Main bus: dry sum + the post-fader sends. Send A routes to the
+                // gated reverb when flagged gated_verb, else the normal reverb.
+                l += tl;
+                r += tr;
+                let (sa_l, sa_r) = (tl * m.send_a, tr * m.send_a);
+                if m.gated_verb {
+                    s.gated_l += sa_l;
+                    s.gated_r += sa_r;
+                } else {
+                    s.reverb_l += sa_l;
+                    s.reverb_r += sa_r;
+                }
+                s.delay_l += tl * m.send_b;
+                s.delay_r += tr * m.send_b;
+            } else if let Some(stem) = aux.get_mut((m.output - 1) as usize) {
+                // Stem: raw post-fader, out of the Main mix + its sends.
+                stem.0 += tl;
+                stem.1 += tr;
             }
-            s.delay_l += tl * m.send_b;
-            s.delay_r += tr * m.send_b;
         }
         self.bus.process_with_sends(l, r, s)
     }
@@ -638,6 +664,23 @@ mod tests {
         assert_eq!(k.voice_mix(0, 0), 0.0, "a sub-threshold send must snap to exactly 0");
         k.set_voice_mix(0, 0, 0.5);
         assert!((k.voice_mix(0, 0) - 0.5).abs() < 1e-6, "a real send is kept");
+    }
+
+    #[test]
+    fn routed_voice_goes_to_its_aux_stem_and_leaves_main() {
+        let mut k = DrumKit::neutral(48_000.0);
+        k.set_voice_mix(0, 8, 1.0); // kick -> Aux 1
+        k.trigger(0, 1.0, true, &[]);
+        let mut aux = [(0.0_f32, 0.0_f32); N_AUX];
+        let mut main_e = 0.0_f32;
+        let mut aux_e = 0.0_f32;
+        for _ in 0..2_000 {
+            let (l, r) = k.render_into(&mut aux);
+            main_e += l.abs() + r.abs();
+            aux_e += aux[0].0.abs() + aux[0].1.abs();
+        }
+        assert!(aux_e > 0.01, "a routed voice must appear on its aux stem, got {aux_e}");
+        assert!(main_e < aux_e * 0.1, "a routed voice must leave the Main mix ({main_e} vs {aux_e})");
     }
 
     #[test]

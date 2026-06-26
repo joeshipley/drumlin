@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use percussion_core::{
     track_for_note, DrumKit, LockableParam, Pattern, SeqState, Sequencer, TrigCondition, VoiceMix,
-    VoicePatch, MAX_STEPS, MAX_TRACKS,
+    VoicePatch, MAX_STEPS, MAX_TRACKS, N_AUX,
 };
 
 const EDITOR_WIDTH: u32 = 1100;
@@ -251,6 +251,10 @@ pub struct Drumlin {
     /// Last SEQ-enable value mirrored into the persisted state, so a toggle (no
     /// step edit) still re-snapshots.
     persisted_seq_enabled: bool,
+
+    /// Preallocated per-sample aux stem accumulator (one stereo pair per aux
+    /// output bus), filled by `kit.render_into` — keeps `process` alloc-free.
+    aux_scratch: [(f32, f32); N_AUX],
 }
 
 impl Default for Drumlin {
@@ -278,6 +282,7 @@ impl Default for Drumlin {
             fx_reset_pending: Arc::new(AtomicBool::new(false)),
             seq_dirty: false,
             persisted_seq_enabled: true,
+            aux_scratch: [(0.0, 0.0); N_AUX],
         }
     }
 }
@@ -382,8 +387,21 @@ impl Plugin for Drumlin {
         main_input_channels: None,
         main_output_channels: NonZeroU32::new(2),
         aux_input_ports: &[],
-        aux_output_ports: &[],
-        names: PortNames::const_default(),
+        // Four stereo aux pairs for per-voice stems (each voice's MIX "output"
+        // picker targets Main or one of these). auval-validated (5 output buses).
+        aux_output_ports: &[
+            new_nonzero_u32(2),
+            new_nonzero_u32(2),
+            new_nonzero_u32(2),
+            new_nonzero_u32(2),
+        ],
+        names: PortNames {
+            layout: None,
+            main_input: None,
+            main_output: Some("Output"),
+            aux_inputs: &[],
+            aux_outputs: &["Aux 1", "Aux 2", "Aux 3", "Aux 4"],
+        },
     }];
 
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
@@ -592,7 +610,7 @@ impl Plugin for Drumlin {
     fn process(
         &mut self,
         buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
+        aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Once per block: panic-reset on a pending KIT/pattern jump.
@@ -763,10 +781,23 @@ impl Plugin for Drumlin {
                 ti += 1;
             }
 
-            let (l, r) = self.kit.render();
+            let (l, r) = self.kit.render_into(&mut self.aux_scratch);
             let g = self.params.gain.smoothed.next();
             for (ch, sample) in channel_samples.into_iter().enumerate() {
                 *sample = if ch == 0 { l * g } else { r * g };
+            }
+            // Per-voice stems -> aux output buses (master gain applied; buses with
+            // no voice routed stay wrapper-zeroed silence).
+            let n = aux.outputs.len().min(N_AUX);
+            for k in 0..n {
+                let chans = aux.outputs[k].as_slice();
+                let (al, ar) = self.aux_scratch[k];
+                if !chans.is_empty() {
+                    chans[0][i] = al * g;
+                }
+                if chans.len() > 1 {
+                    chans[1][i] = ar * g;
+                }
             }
         }
 
