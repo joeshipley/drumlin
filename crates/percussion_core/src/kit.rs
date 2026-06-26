@@ -7,6 +7,7 @@
 
 use crate::bus::{BusSends, DrumBus};
 use crate::drift;
+use crate::mod_matrix::{DrumModDest, DrumModMatrix, DrumModSource, ModGlobals, N_DRUM_DESTS, N_DRUM_SOURCES};
 use crate::plock::{LockableParam, PLock};
 use crate::tail::VoiceTail;
 use crate::voice::{
@@ -173,8 +174,62 @@ pub struct DrumKit {
     mix: [VoiceMixRow; MAX_TRACKS],
     /// Cached "is any track soloed?" so `render` needn't scan 12 tracks/sample.
     any_solo: bool,
+    /// The per-voice mod matrix (M6). Default all-Off → zero modulation → every
+    /// golden render is byte-identical. Evaluated once per hit in `trigger_impl`.
+    mod_matrix: DrumModMatrix,
+    /// Block-rate global mod-source values (LFOs/env/wheel/macros) the plugin
+    /// pushes in. Default 0; the per-hit sources come from the `Trigger`.
+    mod_globals: ModGlobals,
     bus: DrumBus,
     sr: f32,
+}
+
+/// Everything about one hit that varies per-trigger and feeds the voice, the
+/// analog drift, and the mod matrix's per-hit sources. A live `trigger` fills
+/// only velocity/accent (the rest default to 0); the sequencer fills all of it
+/// from the `Trigger`.
+#[derive(Clone, Copy, Default)]
+struct HitParams {
+    velocity: f32,
+    accent: bool,
+    rand_pitch: f32,
+    rand_level: f32,
+    rand_mod: f32,
+    bar_phase: f32,
+    step_pos: f32,
+}
+
+/// The mod contribution to the per-voice tail params, already scaled into
+/// engineering units. Folded into `apply_plocks` on top of base + p-lock. All
+/// zero (the `Default`) when nothing routes to the tail — the byte-exact path.
+#[derive(Clone, Copy, Default)]
+struct ModTailOffsets {
+    level: f32,      // linear gain offset
+    pan: f32,        // -1..+1 offset
+    cutoff_oct: f32, // octaves (multiplies the Hz cutoff)
+    resonance: f32,  // knob-unit offset
+    drive: f32,      // 0..1 offset
+}
+
+impl ModTailOffsets {
+    /// Extract the tail destinations from the matrix accumulator (scaled).
+    fn from_acc(acc: [f32; N_DRUM_DESTS]) -> Self {
+        Self {
+            level: acc[DrumModDest::Level.index()] * DrumModDest::Level.scale(),
+            pan: acc[DrumModDest::Pan.index()] * DrumModDest::Pan.scale(),
+            cutoff_oct: acc[DrumModDest::Cutoff.index()] * DrumModDest::Cutoff.scale(),
+            resonance: acc[DrumModDest::Resonance.index()] * DrumModDest::Resonance.scale(),
+            drive: acc[DrumModDest::Drive.index()] * DrumModDest::Drive.scale(),
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.level != 0.0
+            || self.pan != 0.0
+            || self.cutoff_oct != 0.0
+            || self.resonance != 0.0
+            || self.drive != 0.0
+    }
 }
 
 impl DrumKit {
@@ -240,6 +295,8 @@ impl DrumKit {
             tail_dirty: [false; MAX_TRACKS],
             mix,
             any_solo: false,
+            mod_matrix: DrumModMatrix::new(),
+            mod_globals: ModGlobals::default(),
             bus: DrumBus::neutral(sr),
             sr,
         }
@@ -260,41 +317,46 @@ impl DrumKit {
         self.bus.set_sample_rate(sr);
     }
 
-    /// Trigger a track with no analog drift (live MIDI/pad hits, tests, goldens).
+    /// Trigger a track for a live hit (pad/MIDI, tests, goldens): no drift and no
+    /// seeded mod sources, but global mod (LFOs/macros) + Velocity/Accent routes
+    /// still apply if the matrix is wired.
     pub fn trigger(&mut self, track: usize, velocity: f32, accent: bool, plocks: &[PLock]) {
-        self.trigger_impl(track, velocity, accent, plocks, 0.0, 0.0);
+        self.trigger_impl(track, plocks, HitParams { velocity, accent, ..HitParams::default() });
     }
 
-    /// Trigger a sequencer hit, applying seeded per-hit analog **drift**:
-    /// `rand_pitch`/`rand_level` are the bipolar `-1..1` per-cell randoms; the
-    /// voice's DRIFT amount scales them into a pitch (±cents) + level (±%) wander.
-    pub fn trigger_seq(
-        &mut self,
-        track: usize,
-        velocity: f32,
-        accent: bool,
-        plocks: &[PLock],
-        rand_pitch: f32,
-        rand_level: f32,
-    ) {
-        self.trigger_impl(track, velocity, accent, plocks, rand_pitch, rand_level);
+    /// Trigger a sequencer hit from its `Trigger`, applying seeded per-hit analog
+    /// **drift** + the mod matrix (the Trigger carries the per-hit mod sources:
+    /// drift randoms, RandomPerHit, bar-phase, step-position).
+    pub fn trigger_seq(&mut self, trg: &crate::Trigger) {
+        self.trigger_impl(
+            trg.track as usize,
+            trg.plocks(),
+            HitParams {
+                velocity: trg.velocity,
+                accent: trg.accent,
+                rand_pitch: trg.rand_pitch,
+                rand_level: trg.rand_level,
+                rand_mod: trg.rand_mod,
+                bar_phase: trg.bar_phase,
+                step_pos: trg.step_pos,
+            },
+        );
     }
 
-    /// Applies any per-step parameter locks to the tail, the choke broadcast
-    /// (allocation-free, O(12)), drift (if any), then triggers the voice.
-    fn trigger_impl(
-        &mut self,
-        track: usize,
-        velocity: f32,
-        accent: bool,
-        plocks: &[PLock],
-        rand_pitch: f32,
-        rand_level: f32,
-    ) {
+    /// Applies the mod matrix + per-step p-locks to the tail, the choke broadcast
+    /// (allocation-free, O(12)), drift, then triggers the voice.
+    fn trigger_impl(&mut self, track: usize, plocks: &[PLock], hit: HitParams) {
         if track >= MAX_TRACKS {
             return;
         }
-        self.apply_plocks(track, plocks);
+        // Mod matrix (M6): evaluate once per hit, but ONLY if any route is wired.
+        // An all-Off matrix returns None, so the tail offsets stay zero and the
+        // p-lock fast path / pitch hook run the identical float ops as before —
+        // every golden render is byte-identical at the default.
+        let mod_acc = self.compute_mod_acc(track, &hit);
+        let mod_tail = mod_acc.map(ModTailOffsets::from_acc).unwrap_or_default();
+        self.apply_plocks(track, plocks, mod_tail);
+
         let g = self.mix[track].choke_group;
         if g != 0 {
             for i in 0..MAX_TRACKS {
@@ -303,27 +365,85 @@ impl DrumKit {
                 }
             }
         }
-        // Analog drift: scale the seeded per-hit randoms by the voice's amount.
-        // Pitch is set EVERY trigger (0 cents when undrifted) so a voice can't
-        // keep a stale detune after DRIFT is turned back down; ratio 2^(0/1200) =
-        // 1.0 makes that a bit-exact no-op. Level is gated so an undrifted hit
-        // passes its velocity through byte-for-byte unchanged.
+
+        // Pitch: drift cents + the matrix Pitch dest, summed into the one hook
+        // (set EVERY trigger so no stale detune lingers; 0 cents -> 2^0 = 1.0, a
+        // bit-exact no-op). Level: drift's velocity scale (the matrix Level dest
+        // is a tail VCA, already folded in apply_plocks).
         let drift = self.mix[track].drift;
-        let cents = rand_pitch * drift * drift::PITCH_CENTS_FULL;
-        self.voices[track].set_pitch_drift_cents(cents);
-        let mut velocity = velocity;
+        let drift_cents = hit.rand_pitch * drift * drift::PITCH_CENTS_FULL;
+        let mod_cents = mod_acc
+            .map(|a| a[DrumModDest::Pitch.index()] * DrumModDest::Pitch.scale())
+            .unwrap_or(0.0);
+        self.voices[track].set_pitch_drift_cents(drift_cents + mod_cents);
+
+        let mut velocity = hit.velocity;
         if drift != 0.0 {
-            let level_mult = 1.0 + rand_level * drift * drift::LEVEL_PCT_FULL;
+            let level_mult = 1.0 + hit.rand_level * drift * drift::LEVEL_PCT_FULL;
             velocity = (velocity * level_mult).clamp(0.0, 1.0);
         }
-        self.voices[track].trigger(velocity, accent);
+        self.voices[track].trigger(velocity, hit.accent);
+    }
+
+    /// Build the source array (per-hit values from `hit`, globals from kit state)
+    /// and accumulate the matrix for this track. `None` when nothing is wired —
+    /// the caller then runs the exact pre-M6 path.
+    fn compute_mod_acc(&self, track: usize, hit: &HitParams) -> Option<[f32; N_DRUM_DESTS]> {
+        if !self.mod_matrix.any_active() {
+            return None;
+        }
+        let mut s = [0.0f32; N_DRUM_SOURCES];
+        s[DrumModSource::Velocity.index()] = hit.velocity;
+        s[DrumModSource::Accent.index()] = if hit.accent { 1.0 } else { 0.0 };
+        s[DrumModSource::Lfo1.index()] = self.mod_globals.lfo1;
+        s[DrumModSource::Lfo2.index()] = self.mod_globals.lfo2;
+        s[DrumModSource::ModEnv.index()] = self.mod_globals.mod_env;
+        // PitchEnv/AmpEnv (indices reserved) are not yet produced -> 0.
+        s[DrumModSource::Trigger.index()] = 1.0; // a "this hit happened" gate.
+        s[DrumModSource::RandomPerHit.index()] = hit.rand_mod;
+        s[DrumModSource::BarPhase.index()] = hit.bar_phase;
+        s[DrumModSource::StepPosition.index()] = hit.step_pos;
+        s[DrumModSource::ModWheel.index()] = self.mod_globals.mod_wheel;
+        for (k, &m) in self.mod_globals.macros.iter().enumerate() {
+            s[DrumModSource::Macro1.index() + k] = m;
+        }
+        let mut acc = [0.0f32; N_DRUM_DESTS];
+        self.mod_matrix.accumulate(track, &s, &mut acc);
+        Some(acc)
+    }
+
+    /// Set one mod-matrix slot's routing (the GUI / preset pushes these). `i` is
+    /// `0..16`; depth clamps to `-1..+1`; `target_voice` is `ALL_VOICES` or a
+    /// track index. An all-Off matrix is the byte-exact default.
+    pub fn set_mod_slot(&mut self, i: usize, src: DrumModSource, dst: DrumModDest, depth: f32, target_voice: u8) {
+        self.mod_matrix.set_slot(i, src, dst, depth, target_voice);
+    }
+
+    /// Push the block-rate global mod-source values (LFO1/LFO2/mod-env outputs).
+    pub fn set_mod_globals(&mut self, lfo1: f32, lfo2: f32, mod_env: f32) {
+        self.mod_globals.lfo1 = lfo1;
+        self.mod_globals.lfo2 = lfo2;
+        self.mod_globals.mod_env = mod_env;
+    }
+
+    /// Push the mod-wheel (CC1, `0..1`) value.
+    pub fn set_mod_wheel(&mut self, v: f32) {
+        self.mod_globals.mod_wheel = v;
+    }
+
+    /// Push the 8 macro-knob (K1–K8, `0..1`) values.
+    pub fn set_macros(&mut self, macros: [f32; 8]) {
+        self.mod_globals.macros = macros;
     }
 
     /// Resolve (base + p-lock overrides) onto the track's tail. The dirty flag
     /// lets an unlocked hit on an unlocked tail skip all work — so default
     /// (no-p-lock) playback never touches the tail and stays bit-identical.
-    fn apply_plocks(&mut self, track: usize, plocks: &[PLock]) {
-        if plocks.is_empty() && !self.tail_dirty[track] {
+    fn apply_plocks(&mut self, track: usize, plocks: &[PLock], mod_tail: ModTailOffsets) {
+        // Fast path: unlocked hit, clean tail, no tail modulation -> the tail
+        // already equals the patch default, so touch nothing (byte-identical).
+        let modded = mod_tail.any();
+        if plocks.is_empty() && !self.tail_dirty[track] && !modded {
             return;
         }
         let b = self.base[track];
@@ -348,13 +468,29 @@ impl DrumKit {
                 }
             }
         }
+        // Fold the matrix tail offsets on top of base + p-lock (additive, then
+        // clamped to each param's valid range). Cutoff modulates in octaves. The
+        // Drive on/off gate follows the modulated amount only when Drive is
+        // actually routed, so an unmodulated Drive keeps its p-lock/base state.
+        if modded {
+            level = (level + mod_tail.level).max(0.0);
+            pan = (pan + mod_tail.pan).clamp(-1.0, 1.0);
+            cutoff = (cutoff * 2.0_f32.powf(mod_tail.cutoff_oct)).clamp(20.0, 20_000.0);
+            resonance = (resonance + mod_tail.resonance).clamp(0.0, 1.0);
+            if mod_tail.drive != 0.0 {
+                drive_amt = (drive_amt + mod_tail.drive).clamp(0.0, 1.0);
+                drive_on = drive_amt > 0.001;
+            }
+        }
         let tail = &mut self.tails[track];
         tail.set_level(level);
         tail.set_pan(pan);
         tail.set_lp_cutoff(cutoff);
         tail.set_resonance(resonance);
         tail.set_drive_amount(drive_on, drive_amt);
-        self.tail_dirty[track] = !plocks.is_empty();
+        // Tail now holds an override (p-lock or mod), so the next plain hit must
+        // restore base — mirror the p-lock dirty contract for the mod case too.
+        self.tail_dirty[track] = !plocks.is_empty() || modded;
     }
 
     /// Write a track's tail from its current `base` defaults and clear its dirty
@@ -721,11 +857,28 @@ mod tests {
         assert!((k2.voice_mix(0, 9) - 0.7).abs() < 1e-6, "drift amount survives");
     }
 
+    /// Build a sequencer Trigger for a drift hit (no plocks, no mod sources).
+    fn seq_trig(track: u8, velocity: f32, rand_pitch: f32, rand_level: f32) -> crate::Trigger {
+        crate::Trigger {
+            offset: 0,
+            track,
+            velocity,
+            accent: false,
+            plocks: [PLock::default(); crate::plock::MAX_PLOCKS],
+            plock_count: 0,
+            rand_pitch,
+            rand_level,
+            rand_mod: 0.0,
+            bar_phase: 0.0,
+            step_pos: 0.0,
+        }
+    }
+
     #[test]
     fn drift_changes_the_hit_but_is_a_no_op_at_zero() {
         // Render N samples of a freshly-triggered voice.
         fn render_kick(k: &mut DrumKit, rand_pitch: f32, rand_level: f32) -> Vec<f32> {
-            k.trigger_seq(0, 1.0, false, &[], rand_pitch, rand_level);
+            k.trigger_seq(&seq_trig(0, 1.0, rand_pitch, rand_level));
             (0..2_000).map(|_| k.render().0).collect()
         }
 
@@ -760,7 +913,7 @@ mod tests {
         // detune would make hit 2 differ.
         fn drifted_hit1(k: &mut DrumKit) {
             k.set_voice_mix(0, 9, 1.0);
-            k.trigger_seq(0, 1.0, false, &[], 0.9, 0.0);
+            k.trigger_seq(&seq_trig(0, 1.0, 0.9, 0.0));
             for _ in 0..2_000 {
                 k.render();
             }
@@ -768,15 +921,61 @@ mod tests {
         let mut k = DrumKit::neutral(48_000.0);
         drifted_hit1(&mut k);
         k.set_voice_mix(0, 9, 0.0); // DRIFT off
-        k.trigger_seq(0, 1.0, false, &[], 0.9, 0.0); // big random, but amount 0
+        k.trigger_seq(&seq_trig(0, 1.0, 0.9, 0.0)); // big random, but amount 0
         let after: Vec<f32> = (0..2_000).map(|_| k.render().0).collect();
 
         let mut reference = DrumKit::neutral(48_000.0);
         drifted_hit1(&mut reference);
-        reference.trigger_seq(0, 1.0, false, &[], 0.0, 0.0); // amount 1, zero randoms => undrifted
+        reference.trigger_seq(&seq_trig(0, 1.0, 0.0, 0.0)); // amount 1, zero randoms => undrifted
         let ref_after: Vec<f32> = (0..2_000).map(|_| reference.render().0).collect();
 
         assert_eq!(after, ref_after, "a stale drift detune must not linger after DRIFT=0");
+    }
+
+    #[test]
+    fn mod_routes_modulate_the_voice() {
+        use crate::mod_matrix::{DrumModDest, DrumModSource, ALL_VOICES};
+        // Each render is a FRESH kit's first hit, so the bus state at trigger time
+        // is identical — any difference is the modulation, not residual state.
+        fn render_kick(setup: impl FnOnce(&mut DrumKit)) -> Vec<f32> {
+            let mut k = DrumKit::neutral(48_000.0);
+            setup(&mut k);
+            k.trigger(0, 1.0, false, &[]);
+            (0..2_000).map(|_| k.render().0).collect()
+        }
+        let baseline = render_kick(|_| {});
+
+        // A tail destination (Level, the VCA): Trigger source (= 1.0 at the hit)
+        // -> Level, depth -0.5, all voices. A constant source -> deterministic.
+        let level_mod = render_kick(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::Level, -0.5, ALL_VOICES));
+        assert!(level_mod != baseline, "a wired Level route must change the hit");
+        let level_mod2 = render_kick(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::Level, -0.5, ALL_VOICES));
+        assert_eq!(level_mod, level_mod2, "a constant route must reproduce exactly");
+
+        // The pitch destination (folded into the drift hook).
+        let pitch_mod = render_kick(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::Pitch, 0.5, ALL_VOICES));
+        assert!(pitch_mod != baseline, "a wired Pitch route must change the hit");
+
+        // A cutoff route (tail filter, octaves).
+        let cut_mod = render_kick(|k| k.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::Cutoff, -1.0, ALL_VOICES));
+        assert!(cut_mod != baseline, "a wired Cutoff route must change the hit");
+    }
+
+    #[test]
+    fn mod_route_targeting_another_voice_leaves_this_one_byte_identical() {
+        use crate::mod_matrix::{DrumModDest, DrumModSource};
+        // A route scoped to voice 5 must not perturb voice 0 — byte-for-byte the
+        // same as an empty matrix (the target_voice filter zeroes the accumulator,
+        // so the p-lock fast path runs unchanged).
+        let mut scoped = DrumKit::neutral(48_000.0);
+        scoped.set_mod_slot(0, DrumModSource::Trigger, DrumModDest::Level, -0.5, 5);
+        scoped.trigger(0, 1.0, false, &[]);
+        let a: Vec<f32> = (0..2_000).map(|_| scoped.render().0).collect();
+
+        let mut empty = DrumKit::neutral(48_000.0);
+        empty.trigger(0, 1.0, false, &[]);
+        let b: Vec<f32> = (0..2_000).map(|_| empty.render().0).collect();
+        assert_eq!(a, b, "a route targeting voice 5 must leave voice 0 byte-identical");
     }
 
     #[test]

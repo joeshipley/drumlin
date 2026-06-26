@@ -306,6 +306,21 @@ impl DrumModDest {
     }
 }
 
+/// Block-rate **global** mod-source values the plugin pushes into the kit: the
+/// two LFO + mod-env outputs, the mod wheel (CC1), and the 8 macro knobs. The
+/// per-hit sources (velocity/accent/random/bar-phase/step) come from the
+/// `Trigger`; these are the ones that are the same for every hit in a block.
+/// Default = all `0.0`, a no-op.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ModGlobals {
+    pub lfo1: f32,
+    pub lfo2: f32,
+    pub mod_env: f32,
+    pub mod_wheel: f32,
+    pub macros: [f32; 8],
+}
+
 /// One routing slot: a `source → destination` cable with a bipolar depth and a
 /// per-voice target (`ALL_VOICES` = every voice, else a track index 0..11).
 #[derive(Clone, Copy, Debug, PartialEq)]

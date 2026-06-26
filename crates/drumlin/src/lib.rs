@@ -814,16 +814,9 @@ impl Plugin for Drumlin {
                 if trg.offset as usize > i {
                     break;
                 }
-                // Sequencer hits carry seeded per-hit analog drift (live pad/MIDI
-                // hits above use plain `trigger`, i.e. no drift).
-                self.kit.trigger_seq(
-                    trg.track as usize,
-                    trg.velocity,
-                    trg.accent,
-                    trg.plocks(),
-                    trg.rand_pitch,
-                    trg.rand_level,
-                );
+                // Sequencer hits carry seeded per-hit drift + mod sources on the
+                // Trigger (live pad/MIDI hits above use plain `trigger`).
+                self.kit.trigger_seq(&trg);
                 ti += 1;
             }
 
