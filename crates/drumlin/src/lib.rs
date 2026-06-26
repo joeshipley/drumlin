@@ -214,6 +214,14 @@ struct PersistState {
     mix: VoiceMix,
     #[serde(default)]
     mod_state: ModState,
+    /// The K1–K8 macro labels for the recalled world (display-only — relabels the
+    /// MOD page knobs). Persisted so a reloaded project keeps the world's names.
+    #[serde(default = "default_macro_labels")]
+    macro_labels: [String; 8],
+}
+
+fn default_macro_labels() -> [String; 8] {
+    kits::DEFAULT_MACRO_LABELS.map(String::from)
 }
 
 impl Default for PersistState {
@@ -224,6 +232,7 @@ impl Default for PersistState {
             voices: VoicePatch::default(),
             mix: VoiceMix::default(),
             mod_state: ModState::default(),
+            macro_labels: default_macro_labels(),
         }
     }
 }
@@ -485,6 +494,7 @@ fn stage_kit(state: &mut PersistState, kit: &kits::Kit) -> StagedBus {
     state.voices = VoicePatch::default();
     state.mix = VoiceMix::default();
     state.mod_state = ModState::default();
+    state.macro_labels = kit.macro_labels.map(String::from);
     let mut bus: [Option<f32>; 10] = [None; 10];
     let mut sidechain = None;
     for row in kit.rows {
@@ -744,6 +754,7 @@ impl Plugin for Drumlin {
                                 params.gate_time.unmodulated_normalized_value(),
                             ]);
                             msg["sidechain"] = json!(params.sidechain_key.value());
+                            msg["macro_labels"] = json!(s.macro_labels);
                             ctx.send_json(msg);
                         }
                     }
@@ -865,6 +876,8 @@ impl Plugin for Drumlin {
                                 // Tell the audio thread to adopt the staged state +
                                 // cut tails at block start.
                                 recall_pending.store(true, Ordering::Relaxed);
+                                // Relabel the MOD-page macro knobs for this world.
+                                ctx.send_json(json!({ "type": "macro-labels", "labels": kit.macro_labels }));
                             }
                         }
                     }

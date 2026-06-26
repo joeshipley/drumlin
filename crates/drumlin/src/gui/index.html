@@ -637,6 +637,7 @@
   let modLfo2 = { shape: 1, rate: 5.0, depth: 1.0, retrig: false };
   let modEnv = { attack: 0.005, decay: 0.5 };
   let macros = [0, 0, 0, 0, 0, 0, 0, 0];
+  let macroLabels = ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"];
   const RATE_MAX = 20.0, ENV_DECAY_MAX = 2.0;
 
   function optSelect(opts, value, oninput) {
@@ -701,7 +702,8 @@
     macEl.innerHTML = "<h4>MACROS K1–K8</h4>";
     macros.forEach((m, i) => {
       const cell = document.createElement("div"); cell.className = "mod-mac";
-      const lbl = document.createElement("label"); lbl.textContent = "K" + (i + 1); cell.appendChild(lbl);
+      const lbl = document.createElement("label"); lbl.textContent = macroLabels[i] || ("K" + (i + 1));
+      lbl.title = "macro K" + (i + 1); cell.appendChild(lbl);
       const r = document.createElement("input"); r.type = "range"; r.min = 0; r.max = 1000; r.value = Math.round(m * 1000);
       r.addEventListener("input", () => { macros[i] = +r.value / 1000; send({ type: "set-macro", idx: i, value: macros[i] }); });
       cell.appendChild(r); macEl.appendChild(cell);
@@ -787,6 +789,11 @@
       }
       // Seed the KITS page (factory kits / GROOVE WORLDS).
       if (Array.isArray(msg.kits)) { kitList = msg.kits; if (curView === "kits") buildKits(); }
+      // Seed the K1-K8 macro labels (world relabel).
+      if (Array.isArray(msg.macro_labels)) { macroLabels = msg.macro_labels; if (curView === "mod") buildMod(); }
+    } else if (msg.type === "macro-labels") {
+      // A KIT recall relabeled the macros: update + repaint if on the MOD page.
+      if (Array.isArray(msg.labels)) { macroLabels = msg.labels; if (curView === "mod") buildMod(); }
     } else if (msg.type === "status") {
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";

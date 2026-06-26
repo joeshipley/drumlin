@@ -57,8 +57,6 @@ pub struct Kit {
     /// The curated parameter overrides; empty = "all defaults" (Neutral).
     pub rows: &'static [KitRow],
     /// K1–K8 labels for this world (display-only — relabels the MOD page knobs).
-    /// Read by the recall relabel in chunk 4.
-    #[allow(dead_code)]
     pub macro_labels: [&'static str; 8],
     /// `Some` for a GROOVE WORLD — a builder run editor-side at recall, whose
     /// `Pattern` is memcpy'd into the selected slot. `None` for a timbral KIT
