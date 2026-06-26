@@ -74,6 +74,10 @@ pub struct Trigger {
     /// Seeded per-hit S&H for the mod matrix's `RandomPerHit` source, bipolar
     /// `-1..1` (independent of the drift draws). `0.0` on live/non-seq hits.
     pub rand_mod: f32,
+    /// Mod sources latched per hit: bar-phase (`0..1`, global position in the
+    /// bar) and step-position (`0..1`, the hit's step within its track length).
+    pub bar_phase: f32,
+    pub step_pos: f32,
 }
 
 impl Trigger {

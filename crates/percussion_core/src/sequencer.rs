@@ -313,6 +313,18 @@ struct Carried {
     trig: Trigger,
 }
 
+/// The per-hit modulation values a step computes once and stamps onto every
+/// Trigger it emits (shared across a ratchet's sub-hits). Seeded randoms + the
+/// timing sources; the global sources (LFOs/env/macros) come from kit state.
+#[derive(Clone, Copy)]
+struct HitMods {
+    rand_pitch: f32,
+    rand_level: f32,
+    rand_mod: f32,
+    bar_phase: f32,
+    step_pos: f32,
+}
+
 /// The runtime sequencer. Lives on the audio thread; edits arrive from the GUI
 /// via the plugin's lock-free edit ring.
 pub struct Sequencer {
@@ -357,6 +369,8 @@ impl Sequencer {
             rand_pitch: 0.0,
             rand_level: 0.0,
             rand_mod: 0.0,
+            bar_phase: 0.0,
+            step_pos: 0.0,
         };
         Self {
             pattern,
@@ -734,18 +748,28 @@ impl Sequencer {
         // 6), so it never perturbs the drift draws above.
         let rand_mod =
             XorShift32::new(mix_seed(self.pattern.seed, t as u32, step_idx as u32, PURPOSE_MOD_RANDOM)).next_bipolar();
+        // Per-hit mod timing sources: bar-phase is GLOBAL (position within the
+        // bar, a filter-opens-across-the-bar staple); step-position is PER-TRACK
+        // (the hit's step within its own length — meaningful on polymetric lanes).
+        let mods = HitMods {
+            rand_pitch,
+            rand_level,
+            rand_mod,
+            bar_phase: grid_pos as f32 / self.pattern.length.max(1) as f32,
+            step_pos: step_idx as f32 / slen.max(1) as f32,
+        };
 
         // 6. ratchets — spread the sub-hits over the space remaining between the
         //    (swung) start and the next step boundary, so a roll can't spill past it.
         let ratchet = step.ratchet.clamp(1, 8);
         if ratchet <= 1 {
-            self.schedule(i as f64 + base_off, block_len, t, vel, (rand_pitch, rand_level, rand_mod), &step);
+            self.schedule(i as f64 + base_off, block_len, t, vel, mods, &step);
         } else {
             let span = (samples_per_step - base_off).max(samples_per_step * 0.25);
             let spacing = span / ratchet as f64;
             for k in 0..ratchet {
                 let kv = ratchet_velocity(vel, k, ratchet, step.ratchet_ramp);
-                self.schedule(i as f64 + base_off + k as f64 * spacing, block_len, t, kv, (rand_pitch, rand_level, rand_mod), &step);
+                self.schedule(i as f64 + base_off + k as f64 * spacing, block_len, t, kv, mods, &step);
             }
         }
     }
@@ -757,11 +781,10 @@ impl Sequencer {
         block_len: usize,
         track: usize,
         vel: f32,
-        rands: (f32, f32, f32),
+        mods: HitMods,
         step: &Step,
     ) {
         let off = off_from_block_start.round().max(0.0) as u32;
-        let (rand_pitch, rand_level, rand_mod) = rands;
         let trig = Trigger {
             offset: off,
             track: track as u8,
@@ -769,9 +792,11 @@ impl Sequencer {
             accent: step.accent,
             plocks: step.plocks,
             plock_count: step.plock_count,
-            rand_pitch,
-            rand_level,
-            rand_mod,
+            rand_pitch: mods.rand_pitch,
+            rand_level: mods.rand_level,
+            rand_mod: mods.rand_mod,
+            bar_phase: mods.bar_phase,
+            step_pos: mods.step_pos,
         };
         if (off as usize) < block_len {
             self.push_pending(trig);
