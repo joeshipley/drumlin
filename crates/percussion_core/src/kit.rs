@@ -1276,6 +1276,66 @@ mod tests {
     }
 
     #[test]
+    fn audio_hot_path_is_alloc_free() {
+        use crate::{Sequencer, MAX_STEPS};
+        // The exact per-block work the plugin's process() does, minus the nih-plug
+        // scaffolding (~99% of the hot path): advance the sequencer, dispatch its
+        // triggers, render each sample via render_into. Warm up FIRST (any lazy
+        // allocation happens here), then assert ZERO heap allocations across many
+        // blocks — a heap touch on the audio thread fails this.
+        fn run_block(
+            kit: &mut DrumKit,
+            seq: &mut Sequencer,
+            scratch: &mut [(f32, f32)],
+            pos: f64,
+            sr: f64,
+        ) {
+            seq.process_block(pos, 120.0, sr, 512);
+            let pending = seq.pending();
+            let mut ti = 0;
+            for i in 0..512 {
+                while ti < pending.len() {
+                    let trg = pending[ti];
+                    if trg.offset as usize > i {
+                        break;
+                    }
+                    kit.trigger_seq(&trg);
+                    ti += 1;
+                }
+                kit.render_into(scratch);
+            }
+        }
+
+        let sr = 48_000.0_f64;
+        let mut kit = DrumKit::neutral(sr as f32);
+        let mut seq = Sequencer::new();
+        for t in 0..MAX_TRACKS {
+            for step in (0..MAX_STEPS).step_by(4) {
+                seq.set_step(t, step, true);
+            }
+        }
+        seq.set_playing(true);
+        let mut scratch = vec![(0.0_f32, 0.0_f32); N_AUX];
+        let qn_per_block = (512.0 / sr) * (120.0 / 60.0);
+
+        // Warm-up (outside the armed region): absorb any one-time lazy allocation.
+        let mut pos = 0.0;
+        for _ in 0..4 {
+            run_block(&mut kit, &mut seq, &mut scratch, pos, sr);
+            pos += qn_per_block;
+        }
+
+        // Armed: every allocation here is a real-time-safety regression.
+        let allocs = crate::rt_guard::count_allocs(|| {
+            for _ in 0..128 {
+                run_block(&mut kit, &mut seq, &mut scratch, pos, sr);
+                pos += qn_per_block;
+            }
+        });
+        assert_eq!(allocs, 0, "audio hot path allocated {allocs} time(s) — not real-time-safe");
+    }
+
+    #[test]
     fn nonfinite_drift_cents_stays_finite_per_voice() {
         // A poisoned per-hit pitch offset (NaN/inf cents — the worst a future
         // mod/drift source could feed `set_pitch_drift_cents`) must never make a

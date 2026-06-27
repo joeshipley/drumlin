@@ -28,6 +28,54 @@ pub mod voice;
 #[cfg(test)]
 mod golden;
 
+/// RT-safety harness (test builds only): a global allocator that counts heap
+/// allocations on the current thread while *armed*, so a test can prove the audio
+/// hot path is allocation-free. Thread-local arming + `const`-init cells keep it
+/// safe to touch inside the allocator and immune to other parallel tests' heap
+/// activity. Outside an armed region it is a plain pass-through to `System`.
+#[cfg(test)]
+pub(crate) mod rt_guard {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) struct CountingAlloc;
+
+    // SAFETY: every call delegates to the System allocator; we only read/bump
+    // `const`-init thread-locals (no heap, no re-entry) before delegating.
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ARMED.with(|a| {
+                if a.get() {
+                    COUNT.with(|c| c.set(c.get() + 1));
+                }
+            });
+            System.alloc(layout)
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout)
+        }
+    }
+
+    /// Run `f` with allocation counting armed on this thread; returns the number
+    /// of allocations that happened inside it (`0` == real-time-safe).
+    pub(crate) fn count_allocs(f: impl FnOnce()) -> usize {
+        COUNT.with(|c| c.set(0));
+        ARMED.with(|a| a.set(true));
+        f();
+        ARMED.with(|a| a.set(false));
+        COUNT.with(|c| c.get())
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static RT_ALLOC: rt_guard::CountingAlloc = rt_guard::CountingAlloc;
+
 pub use bus::DrumBus;
 pub use clap_diffuser::ClapDiffuser;
 pub use kit::{track_for_note, DrumKit, VoiceMix, VoiceMixRow, VoicePatch, N_AUX};

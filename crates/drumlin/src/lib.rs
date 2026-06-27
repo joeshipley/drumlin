@@ -1857,6 +1857,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn process_takes_only_try_lock() {
+        // The audio thread must never take a BLOCKING lock (it would risk a
+        // priority-inversion stall). Pin the contract by source inspection: inside
+        // process()'s body, only try_lock() appears — never a bare .lock().
+        let src = include_str!("lib.rs");
+        let start = src.find("fn process(").expect("process() exists");
+        let open = start + src[start..].find('{').expect("process body opens");
+        let mut depth = 0i32;
+        let mut end = open;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &src[open..=end];
+        assert!(
+            !body.contains(".lock("),
+            "process() must use try_lock() only — found a blocking .lock()"
+        );
+        assert!(body.contains("try_lock("), "sanity: process() does acquire state via try_lock()");
+    }
+
     /// The real persistence path: program a bank, JSON round-trip the persisted
     /// blob (exactly what `nih-plug` serializes into the host project), and
     /// confirm every kind of programming survives — including the `[Step; 64]`
