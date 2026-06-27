@@ -110,6 +110,11 @@
   .mod-mac { display: flex; flex-direction: column; align-items: center; gap: 3px; }
   .mod-mac label { font-family: var(--mono); font-size: 8px; color: var(--dim); }
   .mod-mac input[type=range] { width: 100%; }
+  .mod-learn { font-family: var(--mono); font-size: 7px; letter-spacing: 0.3px; color: var(--dim-3); cursor: default; margin-top: 1px; }
+  .mod-learn:hover { color: var(--dim); }
+  .mod-learn.bound { color: var(--accent); }
+  .mod-learn.learning { color: var(--accent); animation: blink 0.8s step-start infinite; }
+  @keyframes blink { 50% { opacity: 0.3; } }
   /* ---- KITS page ---- */
   .kits-wrap { flex: 1; padding: 14px 18px; overflow-y: auto; }
   .kits-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
@@ -671,6 +676,8 @@
   let modEnv = { attack: 0.005, decay: 0.5 };
   let macros = [0, 0, 0, 0, 0, 0, 0, 0];
   let macroLabels = ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"];
+  let macroCc = [-1, -1, -1, -1, -1, -1, -1, -1]; // bound CC per macro (-1 = none)
+  let learningMacro = -1;                          // macro currently MIDI-learning
   const RATE_MAX = 20.0, ENV_DECAY_MAX = 2.0;
 
   function optSelect(opts, value, oninput) {
@@ -739,7 +746,17 @@
       lbl.title = "macro K" + (i + 1); cell.appendChild(lbl);
       const r = document.createElement("input"); r.type = "range"; r.min = 0; r.max = 1000; r.value = Math.round(m * 1000);
       r.addEventListener("input", () => { macros[i] = +r.value / 1000; send({ type: "set-macro", idx: i, value: macros[i] }); });
-      cell.appendChild(r); macEl.appendChild(cell);
+      cell.appendChild(r);
+      // MIDI-learn: click to arm (next CC binds); shows the bound CC; right-click clears.
+      const learn = document.createElement("div"); learn.className = "mod-learn";
+      if (learningMacro === i) { learn.textContent = "learn…"; learn.classList.add("learning"); }
+      else if (macroCc[i] >= 0) { learn.textContent = "CC " + macroCc[i]; learn.classList.add("bound"); }
+      else { learn.textContent = "midi"; }
+      learn.title = "click: MIDI-learn · right-click: clear";
+      learn.addEventListener("click", () => { learningMacro = i; send({ type: "midi-learn", macro_idx: i }); buildMod(); });
+      learn.addEventListener("contextmenu", (e) => { e.preventDefault(); if (learningMacro === i) learningMacro = -1; send({ type: "midi-clear", macro_idx: i }); buildMod(); });
+      cell.appendChild(learn);
+      macEl.appendChild(cell);
     });
   }
 
@@ -854,11 +871,20 @@
       if (Array.isArray(msg.kits)) { kitList = msg.kits; if (curView === "kits") buildKits(); }
       // Seed the K1-K8 macro labels (world relabel).
       if (Array.isArray(msg.macro_labels)) { macroLabels = msg.macro_labels; if (curView === "mod") buildMod(); }
+      // Seed the MIDI-learn bindings (CC per macro).
+      if (Array.isArray(msg.macro_cc)) { macroCc = msg.macro_cc; if (curView === "mod") buildMod(); }
       // Seed the user-preset browser list.
       if (Array.isArray(msg.presets)) { presetList = msg.presets; if (curView === "kits") buildKits(); }
     } else if (msg.type === "macro-labels") {
       // A KIT recall relabeled the macros: update + repaint if on the MOD page.
       if (Array.isArray(msg.labels)) { macroLabels = msg.labels; if (curView === "mod") buildMod(); }
+    } else if (msg.type === "macro-cc") {
+      // MIDI-learn bindings changed (a learn completed / cleared).
+      if (Array.isArray(msg.macro_cc)) {
+        macroCc = msg.macro_cc;
+        learningMacro = -1; // a completed bind clears the arming indicator
+        if (curView === "mod") buildMod();
+      }
     } else if (msg.type === "presets") {
       // Save/delete refreshed the disk list.
       presetList = msg.presets || []; if (curView === "kits") buildKits();

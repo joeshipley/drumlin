@@ -18,7 +18,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicI32, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use percussion_core::{
@@ -98,6 +98,10 @@ enum Action {
     AbStore { slot: u8 },
     AbRecall { slot: u8 },
     AbCopy,
+    /// Arm MIDI-learn for a macro (the next CC binds to it).
+    MidiLearn { macro_idx: u8 },
+    /// Clear any CC bound to a macro (and disarm if it was learning).
+    MidiClear { macro_idx: u8 },
     Transport { play: bool },
     SeqEnable { on: bool },
     SidechainEnable { on: bool },
@@ -225,6 +229,10 @@ struct PersistState {
     /// MOD page knobs). Persisted so a reloaded project keeps the world's names.
     #[serde(default = "default_macro_labels")]
     macro_labels: [String; 8],
+    /// MIDI-learn map: `(cc, macro)` pairs binding a CC to a K1–K8 macro. Empty
+    /// by default; rebuilt into the lock-free lookup on load.
+    #[serde(default)]
+    midi_cc: Vec<(u8, u8)>,
 }
 
 fn default_macro_labels() -> [String; 8] {
@@ -240,6 +248,7 @@ impl Default for PersistState {
             mix: VoiceMix::default(),
             mod_state: ModState::default(),
             macro_labels: default_macro_labels(),
+            midi_cc: Vec::new(),
         }
     }
 }
@@ -359,6 +368,13 @@ pub struct Drumlin {
     /// auval/headless render never spuriously recalls.
     recall_pending: Arc<AtomicBool>,
 
+    /// MIDI-learn (M9): lock-free CC->macro lookup (index = CC 0..127; value =
+    /// macro 0..7, or -1 = unbound). The audio thread reads it on every MidiCC;
+    /// the editor writes it on learn/clear/load. `learn_arm` holds the macro
+    /// currently being learned (-1 = idle); the audio thread binds the next CC.
+    cc_to_macro: Arc<[AtomicI8; 128]>,
+    learn_arm: Arc<AtomicI8>,
+
     /// Set when a sequencer edit lands; the next block snapshots the bank into
     /// the persisted state via a non-blocking `try_lock`, so the audio thread
     /// never stalls on the host's save.
@@ -399,6 +415,8 @@ impl Default for Drumlin {
             effective_playing: Arc::new(AtomicBool::new(false)),
             seq_enabled: Arc::new(AtomicBool::new(true)),
             recall_pending: Arc::new(AtomicBool::new(false)),
+            cc_to_macro: Arc::new(core::array::from_fn(|_| AtomicI8::new(-1))),
+            learn_arm: Arc::new(AtomicI8::new(-1)),
             seq_dirty: false,
             persisted_seq_enabled: true,
             aux_scratch: [(0.0, 0.0); N_AUX],
@@ -680,6 +698,19 @@ fn full_json(
     msg
 }
 
+/// Derive the per-macro bound CC (`-1` = unbound) from the lock-free lookup, for
+/// the GUI display (the last CC bound to each macro wins).
+fn macro_cc_map(cc_to_macro: &[AtomicI8; 128]) -> [i32; 8] {
+    let mut m = [-1i32; 8];
+    for (cc, slot) in cc_to_macro.iter().enumerate() {
+        let v = slot.load(Ordering::Relaxed);
+        if (0..8).contains(&v) {
+            m[v as usize] = cc as i32;
+        }
+    }
+    m
+}
+
 /// A portable SOUND snapshot (the same fields a disk preset stores). The carrier
 /// for preset load + A/B compare: capture the current sound, or apply one.
 #[derive(Clone)]
@@ -780,6 +811,13 @@ impl Plugin for Drumlin {
         // A/B compare registers, editor-local (Arc<Mutex> like last_status, since
         // the event-loop closure is Send). Not persisted — a session tool.
         let ab = Arc::new(Mutex::new(AbState::default()));
+        let cc_to_macro = self.cc_to_macro.clone();
+        let learn_arm = self.learn_arm.clone();
+        // Last macro->CC map sent to the GUI (suppress unchanged sends).
+        let last_macro_cc = Arc::new(Mutex::new([-1i32; 8]));
+        // Set when the MIDI-learn map changes; the persist is retried each tick
+        // until try_lock succeeds (so a bind isn't lost on lock contention).
+        let midi_persist_pending = Arc::new(AtomicBool::new(false));
         // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
         // unchanged status sends.
         let last_status = Arc::new(AtomicU32::new(u32::MAX));
@@ -857,10 +895,11 @@ impl Plugin for Drumlin {
                         // params + the SC toggle are host-persisted but the sliders
                         // are otherwise write-only.)
                         if let Ok(s) = params.state.lock() {
-                            let msg = full_json(
+                            let mut msg = full_json(
                                 &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
                                 &bus_values(&params), params.sidechain_key.value(), &presets::list(),
                             );
+                            msg["macro_cc"] = json!(macro_cc_map(&cc_to_macro));
                             ctx.send_json(msg);
                         }
                     }
@@ -1056,6 +1095,24 @@ impl Plugin for Drumlin {
                             }
                         }
                     }
+                    Action::MidiLearn { macro_idx } => {
+                        if macro_idx < 8 {
+                            learn_arm.store(macro_idx as i8, Ordering::Relaxed);
+                        }
+                    }
+                    Action::MidiClear { macro_idx } => {
+                        // Disarm BEFORE scanning: once the audio thread can't bind a
+                        // new CC to this macro, the scan is guaranteed to clear any
+                        // slot (closes the clear-vs-bind race).
+                        if learn_arm.load(Ordering::Relaxed) == macro_idx as i8 {
+                            learn_arm.store(-1, Ordering::Relaxed);
+                        }
+                        for slot in cc_to_macro.iter() {
+                            if slot.load(Ordering::Relaxed) == macro_idx as i8 {
+                                slot.store(-1, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
                     Action::SeqEnable { on } => seq_enabled.store(on, Ordering::Relaxed),
                     Action::SidechainEnable { on } => {
@@ -1098,6 +1155,37 @@ impl Plugin for Drumlin {
                     "pump": pump_env,
                 }));
             }
+
+            // MIDI-learn: when the bound map changes (a learn completed on the
+            // audio thread, or a clear), push it to the GUI + flag a persist.
+            // Diffed each tick so the editor needn't be notified explicitly.
+            let mcc = macro_cc_map(&cc_to_macro);
+            let changed = match last_macro_cc.lock() {
+                Ok(mut l) if *l != mcc => {
+                    *l = mcc;
+                    true
+                }
+                _ => false,
+            };
+            if changed {
+                ctx.send_json(json!({ "type": "macro-cc", "macro_cc": mcc }));
+                midi_persist_pending.store(true, Ordering::Relaxed);
+            }
+            // Persist the map, retrying across ticks until try_lock wins (so a
+            // bind made the same tick the host serializes isn't lost on reload).
+            if midi_persist_pending.load(Ordering::Relaxed) {
+                if let Ok(mut s) = params.state.try_lock() {
+                    s.midi_cc = cc_to_macro
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(cc, slot)| {
+                            let m = slot.load(Ordering::Relaxed);
+                            (m >= 0).then_some((cc as u8, m as u8))
+                        })
+                        .collect();
+                    midi_persist_pending.store(false, Ordering::Relaxed);
+                }
+            }
         });
 
         Some(Box::new(editor))
@@ -1133,6 +1221,15 @@ impl Plugin for Drumlin {
                 &state,
                 adopt_seq,
             );
+            // Rebuild the lock-free MIDI-learn lookup from the persisted map.
+            for slot in self.cc_to_macro.iter() {
+                slot.store(-1, Ordering::Relaxed);
+            }
+            for &(cc, macro_idx) in &state.midi_cc {
+                if (cc as usize) < 128 && macro_idx < 8 {
+                    self.cc_to_macro[cc as usize].store(macro_idx as i8, Ordering::Relaxed);
+                }
+            }
         }
         true
     }
@@ -1351,6 +1448,9 @@ impl Plugin for Drumlin {
         self.mod_engine.advance(block_len);
         self.kit.set_mod_globals(self.mod_engine.lfo1(), self.mod_engine.lfo2(), self.mod_engine.mod_env());
         self.kit.set_mod_wheel(self.mod_wheel);
+        // Push the macro values every block so a learned-CC twist (written into
+        // self.macros in the MidiCC handler) actually reaches the kit.
+        self.kit.set_macros(self.macros);
 
         self.seq.process_block(pos_qn, tempo, sr, block_len);
 
@@ -1382,9 +1482,27 @@ impl Plugin for Drumlin {
                             self.kit.trigger(t, velocity, false, &[]);
                         }
                     }
-                    // Mod-wheel (CC1) feeds the ModWheel mod source. Latched for
-                    // the next block's fan-in (sources are sampled per hit).
-                    NoteEvent::MidiCC { cc: 1, value, .. } => self.mod_wheel = value,
+                    NoteEvent::MidiCC { cc, value, .. } => {
+                        let cc = cc as usize;
+                        if cc < 128 {
+                            // MIDI-learn: if armed, bind this CC to the macro + disarm
+                            // (the editor picks the change up + persists it).
+                            let arm = self.learn_arm.load(Ordering::Relaxed);
+                            if arm >= 0 {
+                                self.cc_to_macro[cc].store(arm, Ordering::Relaxed);
+                                self.learn_arm.store(-1, Ordering::Relaxed);
+                            }
+                            // Apply a bound CC to its macro (pushed via set_macros).
+                            let m = self.cc_to_macro[cc].load(Ordering::Relaxed);
+                            if (0..8).contains(&m) {
+                                self.macros[m as usize] = value;
+                            }
+                        }
+                        // CC1 also feeds the dedicated mod-wheel source.
+                        if cc == 1 {
+                            self.mod_wheel = value;
+                        }
+                    }
                     _ => {}
                 }
                 next_midi = context.next_event();
