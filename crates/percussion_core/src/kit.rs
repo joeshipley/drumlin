@@ -1298,6 +1298,180 @@ mod tests {
         }
     }
 
+    // --- M10 finiteness + exact-silence smoke suite (property tests, never
+    // goldens): the engine must stay finite + bus-limited at every extreme, and
+    // return to *exact* zero when idle (no denormal floor). ---
+
+    /// The worst-case p-lock corners to drive a voice to its rails.
+    fn extreme_plock_cases() -> Vec<Vec<PLock>> {
+        use LockableParam::*;
+        let one = |p: LockableParam, v: f32| vec![PLock { param: p.index() as u16, value: v }];
+        vec![
+            vec![],                 // unlocked baseline
+            one(Cutoff, 0.0),       // filter slammed shut
+            one(Cutoff, 1.0),       // filter wide open
+            one(Resonance, 1.0),    // self-oscillation territory
+            one(Drive, 1.0),        // max saturation
+            one(Level, 1.0),        // max VCA
+            one(Decay, 0.0),        // shortest tail
+            one(Decay, 1.0),        // longest tail
+            one(Pitch, 0.0),        // pitch floor
+            one(Pitch, 1.0),        // pitch ceiling
+            // a 4-lock worst case stacking the loud/long corners
+            vec![
+                PLock { param: Cutoff.index() as u16, value: 1.0 },
+                PLock { param: Resonance.index() as u16, value: 1.0 },
+                PLock { param: Drive.index() as u16, value: 1.0 },
+                PLock { param: Decay.index() as u16, value: 1.0 },
+            ],
+        ]
+    }
+
+    fn sweep_voice_finite(sr: f32, samples: usize, full: bool) {
+        let cases = extreme_plock_cases();
+        // Full sweep at the primary rate; just the 4-lock worst case at the others
+        // (the sub-Nyquist clamps are the only sr-dependent part).
+        let cases: &[Vec<PLock>] =
+            if full { &cases } else { std::slice::from_ref(cases.last().unwrap()) };
+        for track in 0..MAX_TRACKS {
+            for &vel in &[0.0_f32, 0.01, 0.5, 1.0] {
+                for &accent in &[false, true] {
+                    for plocks in cases {
+                        let mut kit = DrumKit::neutral(sr);
+                        kit.trigger(track, vel, accent, plocks);
+                        let mut peak = 0.0_f32;
+                        for _ in 0..samples {
+                            let (l, r) = kit.render();
+                            assert!(
+                                l.is_finite() && r.is_finite(),
+                                "track {track} sr {sr} vel {vel} accent {accent} rendered non-finite"
+                            );
+                            peak = peak.max(l.abs()).max(r.abs());
+                        }
+                        assert!(peak <= 1.02, "track {track} sr {sr} exceeded the limiter: peak={peak}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_voice_is_finite_and_bounded_at_extremes() {
+        sweep_voice_finite(48_000.0, 3_000, true);
+        // the sub-Nyquist clamps depend on sr — sweep the rates too (worst case).
+        sweep_voice_finite(44_100.0, 2_000, false);
+        sweep_voice_finite(96_000.0, 2_000, false);
+    }
+
+    #[test]
+    fn mod_matrix_saturated_stays_finite() {
+        // Every one of the 16 slots active to track 0, cycling all dests at +/-1
+        // depth, with every global/macro/wheel at 1.0 and 4 stacked p-locks —
+        // the most the mod matrix can throw at a voice. Must stay finite + limited.
+        let mut kit = DrumKit::neutral(48_000.0);
+        for i in 0..16 {
+            let dst = DrumModDest::from_index(1 + (i % (N_DRUM_DESTS - 1))); // skip Off=0
+            let src = DrumModSource::from_index(1 + (i % (N_DRUM_SOURCES - 1)));
+            let depth = if i % 2 == 0 { 1.0 } else { -1.0 };
+            kit.set_mod_slot(i, src, dst, depth, 0);
+        }
+        kit.set_mod_globals(1.0, 1.0, 1.0);
+        kit.set_mod_wheel(1.0);
+        kit.set_macros([1.0; 8]);
+        let plocks = [
+            PLock { param: LockableParam::Cutoff.index() as u16, value: 1.0 },
+            PLock { param: LockableParam::Resonance.index() as u16, value: 1.0 },
+            PLock { param: LockableParam::Pitch.index() as u16, value: 1.0 },
+            PLock { param: LockableParam::Decay.index() as u16, value: 1.0 },
+        ];
+        let mut peak = 0.0_f32;
+        for _ in 0..8 {
+            kit.trigger(0, 1.0, true, &plocks);
+            for _ in 0..4_000 {
+                let (l, r) = kit.render();
+                assert!(l.is_finite() && r.is_finite(), "saturated mod went non-finite");
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+        }
+        assert!(peak <= 1.02, "saturated mod exceeded the limiter: peak={peak}");
+    }
+
+    #[test]
+    fn stacked_ampdecay_routes_stay_clamped() {
+        // 16 AmpDecay routes at max depth must NOT drive the decay to a runaway/
+        // stuck tail — the +/-2 oct clamp bounds the scale to [0.25x, 4x], so even
+        // the longest voice goes quiet well within a few seconds.
+        let mut kit = DrumKit::neutral(48_000.0);
+        for i in 0..16 {
+            kit.set_mod_slot(i, DrumModSource::from_index(1), DrumModDest::AmpDecay, 1.0, 0);
+        }
+        kit.set_macros([1.0; 8]);
+        kit.set_mod_globals(1.0, 1.0, 1.0);
+        kit.set_mod_wheel(1.0);
+        kit.trigger(0, 1.0, true, &[]);
+        let total = 48_000 * 8;
+        let mut last_loud = 0;
+        for n in 0..total {
+            let (l, r) = kit.render();
+            assert!(l.is_finite() && r.is_finite());
+            if l.abs() > 1e-4 || r.abs() > 1e-4 {
+                last_loud = n;
+            }
+        }
+        assert!(last_loud < total - 1, "tail must end within 8s even with stacked AmpDecay (clamp holds)");
+    }
+
+    #[test]
+    fn idle_kit_is_exact_silence() {
+        // No triggers => the bus must emit EXACT zero (no denormal floor).
+        let mut kit = DrumKit::neutral(48_000.0);
+        for _ in 0..96_000 {
+            let (l, r) = kit.render();
+            assert_eq!(l, 0.0, "idle kit must be exact zero");
+            assert_eq!(r, 0.0, "idle kit must be exact zero");
+        }
+    }
+
+    #[test]
+    fn idle_kit_with_live_sends_is_exact_silence() {
+        // Reverb/delay sends up + a live mod route, but nothing triggered: an
+        // unfed FX tail must not leak a denormal. Still exact zero.
+        let mut kit = DrumKit::neutral(48_000.0);
+        kit.set_voice_mix(0, 0, 0.8); // send A (reverb)
+        kit.set_voice_mix(0, 1, 0.8); // send B (delay)
+        kit.set_mod_slot(0, DrumModSource::from_index(3), DrumModDest::Cutoff, 1.0, 0xFF);
+        kit.set_mod_globals(1.0, 1.0, 1.0);
+        for _ in 0..96_000 {
+            let (l, r) = kit.render();
+            assert_eq!(l, 0.0, "live-but-unfed sends must stay exact zero");
+            assert_eq!(r, 0.0, "live-but-unfed sends must stay exact zero");
+        }
+    }
+
+    #[test]
+    fn bus_silence_decays_to_exact_zero() {
+        // Excite the whole kit with sends up, then run on silence: every tail +
+        // the reverb/delay feedback must decay and FLUSH to a true zero (anything
+        // below 1e-25 snaps to 0), never settle on a stuck denormal/DC floor.
+        let mut kit = DrumKit::neutral(48_000.0);
+        for t in 0..MAX_TRACKS {
+            kit.set_voice_mix(t, 0, 0.6);
+            kit.set_voice_mix(t, 1, 0.6);
+            kit.trigger(t, 1.0, true, &[]);
+        }
+        let cap = 48_000 * 30; // generous; deterministic (neutral kit, fixed params)
+        let mut zero_at = None;
+        for n in 0..cap {
+            let (l, r) = kit.render();
+            assert!(l.is_finite() && r.is_finite());
+            if l == 0.0 && r == 0.0 {
+                zero_at = Some(n);
+                break;
+            }
+        }
+        assert!(zero_at.is_some(), "bus must flush to exact zero within 30s of silence");
+    }
+
     fn kick_peak(kit: &mut DrumKit) -> f32 {
         let mut p = 0.0_f32;
         for _ in 0..4_000 {
