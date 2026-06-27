@@ -38,6 +38,9 @@ const EDIT_QUEUE_CAP: usize = 512;
 /// Default velocity for on-screen pad hits.
 const PAD_VELOCITY: f32 = 0.9;
 
+/// Max undo/redo depth (whole-pattern snapshots).
+const UNDO_CAP: usize = 64;
+
 /// Editor -> audio sequencer edits, sent over a lock-free ring and applied at
 /// block start. POD/`Copy` so the ring never allocates.
 #[derive(Clone, Copy)]
@@ -102,6 +105,8 @@ enum Action {
     MidiLearn { macro_idx: u8 },
     /// Clear any CC bound to a macro (and disarm if it was learning).
     MidiClear { macro_idx: u8 },
+    Undo,
+    Redo,
     Transport { play: bool },
     SeqEnable { on: bool },
     SidechainEnable { on: bool },
@@ -698,6 +703,20 @@ fn full_json(
     msg
 }
 
+/// True for grid edits that change the current pattern's content (snapshotted for
+/// undo). Selection / transport / sound / continuous-feel edits are excluded.
+fn action_mutates_pattern(a: &Action) -> bool {
+    matches!(
+        a,
+        Action::Step { .. }
+            | Action::StepParams { .. }
+            | Action::SetPlock { .. }
+            | Action::ClearPlock { .. }
+            | Action::ClearLane { .. }
+            | Action::Euclid { .. }
+    )
+}
+
 /// Derive the per-macro bound CC (`-1` = unbound) from the lock-free lookup, for
 /// the GUI display (the last CC bound to each macro wins).
 fn macro_cc_map(cc_to_macro: &[AtomicI8; 128]) -> [i32; 8] {
@@ -811,6 +830,10 @@ impl Plugin for Drumlin {
         // A/B compare registers, editor-local (Arc<Mutex> like last_status, since
         // the event-loop closure is Send). Not persisted — a session tool.
         let ab = Arc::new(Mutex::new(AbState::default()));
+        // Undo/redo of grid edits: editor-local stacks of whole-pattern snapshots
+        // (Pattern is Copy). Restore reuses the recall path. Bounded to UNDO_CAP.
+        let undo_stack: Arc<Mutex<Vec<Pattern>>> = Arc::new(Mutex::new(Vec::new()));
+        let redo_stack: Arc<Mutex<Vec<Pattern>>> = Arc::new(Mutex::new(Vec::new()));
         let cc_to_macro = self.cc_to_macro.clone();
         let learn_arm = self.learn_arm.clone();
         // Last macro->CC map sent to the GUI (suppress unchanged sends).
@@ -882,10 +905,63 @@ impl Plugin for Drumlin {
                     }
                 }};
             }
+            // Undo/redo: pop a pattern snapshot from $src, push the current onto
+            // $dst, restore it into the selected slot, and re-seed via the recall
+            // path. Reuses the GUI re-seed + recall drain (the playhead resets).
+            macro_rules! restore_from {
+                ($src:expr, $dst:expr) => {{
+                    let restored = $src.lock().ok().and_then(|mut s| s.pop());
+                    if let Some(p) = restored {
+                        let msg = if let Ok(mut s) = params.state.lock() {
+                            let cur = s.seq.current as usize;
+                            if let Some(slot) = s.seq.patterns.get_mut(cur) {
+                                let current = *slot;
+                                if let Ok(mut d) = $dst.lock() {
+                                    d.push(current);
+                                    if d.len() > UNDO_CAP {
+                                        d.remove(0);
+                                    }
+                                }
+                                *slot = p;
+                            }
+                            let mut m = full_json(
+                                &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
+                                &bus_values(&params), params.sidechain_key.value(), &presets::list(),
+                            );
+                            m["macro_cc"] = json!(macro_cc_map(&cc_to_macro));
+                            Some(m)
+                        } else {
+                            None
+                        };
+                        if let Some(msg) = msg {
+                            recall_pending.store(true, Ordering::Relaxed);
+                            ctx.send_json(msg);
+                        }
+                    }
+                }};
+            }
             while let Ok(value) = ctx.next_event() {
                 let Ok(action) = serde_json::from_value::<Action>(value) else {
                     continue;
                 };
+                // Before a grid edit, snapshot the current pattern for undo (and
+                // drop the redo branch). At human edit speed the persisted pattern
+                // already reflects the previous edit, so the snapshot is accurate.
+                if action_mutates_pattern(&action) {
+                    if let Ok(s) = params.state.lock() {
+                        if let Some(p) = s.seq.patterns.get(s.seq.current as usize).copied() {
+                            if let Ok(mut u) = undo_stack.lock() {
+                                u.push(p);
+                                if u.len() > UNDO_CAP {
+                                    u.remove(0);
+                                }
+                            }
+                            if let Ok(mut r) = redo_stack.lock() {
+                                r.clear();
+                            }
+                        }
+                    }
+                }
                 match action {
                     Action::Init => {
                         // Seed the GUI from the persisted/live state so it shows
@@ -1113,6 +1189,8 @@ impl Plugin for Drumlin {
                             }
                         }
                     }
+                    Action::Undo => restore_from!(undo_stack, redo_stack),
+                    Action::Redo => restore_from!(redo_stack, undo_stack),
                     Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
                     Action::SeqEnable { on } => seq_enabled.store(on, Ordering::Relaxed),
                     Action::SidechainEnable { on } => {
