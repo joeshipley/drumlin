@@ -30,10 +30,14 @@ AU_MANUF_NAME="${AU_MANUF_NAME:-Joe Shipley}"
 AU_MANUF_CODE="${AU_MANUF_CODE:-JShp}"              # 4-char AU manufacturer code (shared family code)
 AU_SUBTYPE_CODE="${AU_SUBTYPE_CODE:-Drml}"          # 4-char AU subtype code (distinct from Esker's Eskr)
 AU_INSTRUMENT_TYPE="${AU_INSTRUMENT_TYPE:-aumu}"    # aumu = instrument/music device
-AU_BUNDLE_VERSION="${AU_BUNDLE_VERSION:-0.1.0}"
+AU_BUNDLE_VERSION="${AU_BUNDLE_VERSION:-1.0.0}"     # keep in step with workspace.package.version
 AU_BUNDLE_ID="${AU_BUNDLE_ID:-com.joeshipley.drumlin}"
 CLAP_WRAPPER_TAG="${CLAP_WRAPPER_TAG:-v0.12.1}"     # pin clap-wrapper for reproducibility
-ARCH="${ARCH:-$(uname -m)}"                         # arm64 or x86_64
+# Ship architecture: arm64-only (Apple Silicon, M1+). Decided at M10 — the
+# simplest, smallest build for current/future Macs. For a universal binary,
+# build both cargo targets and `lipo` the .clap MacOS binary, then override
+# ARCH="arm64;x86_64" (CMAKE_OSX_ARCHITECTURES below already honors it).
+ARCH="${ARCH:-arm64}"                               # arm64 (ship default) or x86_64
 # clap-wrapper's shared_prologue.cmake does `if (${CMAKE_OSX_DEPLOYMENT_TARGET}
 # VERSION_GREATER_EQUAL "10.15")`, which errors out if the var is empty. Pass an
 # explicit target (>=10.15 -> uses std::filesystem, no gulrak CPM stub).
