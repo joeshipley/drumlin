@@ -101,8 +101,10 @@ impl TomVoice {
     pub fn render(&mut self) -> (f32, f32) {
         let st = self.pitch_amount_st * self.pitch.next();
         // Drift folds into the pitch exponent (one powf; bit-exact at 0 cents).
-        let hz = (self.base_hz * 2.0_f32.powf(st / 12.0 + self.drift_cents / 1200.0))
-            .clamp(1.0, 0.45 * self.sr);
+        let hz = crate::drift::safe_hz(
+            self.base_hz * 2.0_f32.powf(st / 12.0 + self.drift_cents / 1200.0),
+            self.sr,
+        );
         self.osc.set_frequency(hz);
         let body = self.osc.next_sample() * self.amp.next();
         let exc = self.noise.next(NoiseType::White) * self.exciter.next() * 0.4;

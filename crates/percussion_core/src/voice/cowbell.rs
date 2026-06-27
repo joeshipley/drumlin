@@ -5,6 +5,18 @@
 use crate::pitch_env::DahdEnv;
 use synth_core::Filter;
 
+/// Fold a phase increment to a safe value: NaN/inf → `0.0` (a stuck-DC guard),
+/// else clamped sub-Nyquist. Finite inputs are just the clamp (golden-safe);
+/// this only adds the non-finite guard `f32::clamp` lacks.
+#[inline]
+fn safe_inc(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 0.49)
+    } else {
+        0.0
+    }
+}
+
 pub struct CowbellVoice {
     sr: f32,
     phase1: f32,
@@ -46,8 +58,8 @@ impl CowbellVoice {
 
     fn apply(&mut self) {
         // stop short of Nyquist (0.49), matching the resonator/filter margin
-        self.inc1 = (self.base_hz / self.sr).clamp(0.0, 0.49);
-        self.inc2 = (self.base_hz * self.ratio / self.sr).clamp(0.0, 0.49);
+        self.inc1 = safe_inc(self.base_hz / self.sr);
+        self.inc2 = safe_inc(self.base_hz * self.ratio / self.sr);
         self.hp.set_cutoff(self.hp_hz);
         self.hp.set_resonance(0.1);
         self.amp.set_params(0.3, 2.0, 280.0 * self.decay_scale);
@@ -78,8 +90,8 @@ impl CowbellVoice {
         // Re-derive the increments with this hit's drift (ratio 1.0 at 0 cents
         // reproduces the setup values exactly).
         let r = crate::drift::cents_to_ratio(self.drift_cents);
-        self.inc1 = (self.base_hz * r / self.sr).clamp(0.0, 0.49);
-        self.inc2 = (self.base_hz * self.ratio * r / self.sr).clamp(0.0, 0.49);
+        self.inc1 = safe_inc(self.base_hz * r / self.sr);
+        self.inc2 = safe_inc(self.base_hz * self.ratio * r / self.sr);
         self.hp.reset(); // start each hit from a clean filter state
         self.amp.trigger();
         let acc = if accent { 1.0 + self.accent_amt } else { 1.0 };

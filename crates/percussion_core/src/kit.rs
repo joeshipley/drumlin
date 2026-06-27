@@ -1275,6 +1275,29 @@ mod tests {
         assert!(peak <= 1.02, "bus limiter should hold the kit at ~0 dBFS, peak={peak}");
     }
 
+    #[test]
+    fn nonfinite_drift_cents_stays_finite_per_voice() {
+        // A poisoned per-hit pitch offset (NaN/inf cents — the worst a future
+        // mod/drift source could feed `set_pitch_drift_cents`) must never make a
+        // voice render non-finite. Renders each voice in isolation so the bus
+        // limiter can't mask a NaN; the safe_hz / cents_to_ratio / safe_inc folds
+        // are what hold the line.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut kit = DrumKit::neutral(48_000.0);
+            for t in 0..MAX_TRACKS {
+                kit.voices[t].set_pitch_drift_cents(bad);
+                kit.voices[t].trigger(1.0, true);
+                for _ in 0..4_000 {
+                    let (l, r) = kit.voices[t].render();
+                    assert!(
+                        l.is_finite() && r.is_finite(),
+                        "track {t} rendered non-finite with drift cents = {bad}"
+                    );
+                }
+            }
+        }
+    }
+
     fn kick_peak(kit: &mut DrumKit) -> f32 {
         let mut p = 0.0_f32;
         for _ in 0..4_000 {

@@ -143,6 +143,21 @@ mod tests {
     }
 
     #[test]
+    fn dahd_nan_params_stay_finite_and_idle() {
+        // Non-finite stage times must fold to safe defaults (the `.max()` guards)
+        // so the env stays finite and still reaches idle — never a stuck NaN.
+        let mut e = DahdEnv::new(48_000.0);
+        e.set_params(f32::NAN, f32::NAN, f32::NAN);
+        e.trigger();
+        let mut samples = 0;
+        while e.is_active() {
+            assert!(e.next().is_finite(), "env must stay finite with NaN params");
+            samples += 1;
+            assert!(samples < 480_000, "env must still reach idle with NaN params");
+        }
+    }
+
+    #[test]
     fn instant_attack_starts_at_full() {
         let mut e = DahdEnv::new(48_000.0);
         e.set_params(0.0, 1.0, 100.0);

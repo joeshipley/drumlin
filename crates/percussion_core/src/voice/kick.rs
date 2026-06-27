@@ -107,8 +107,10 @@ impl KickVoice {
         // Clamp below Nyquist so future tuning/param ranges can't alias the body.
         // Drift folds into the pitch exponent (cents/1200 octaves) so render keeps
         // a single powf; `+ 0` at 0 cents leaves the value bit-exact.
-        let hz = (self.base_hz * 2.0_f32.powf(st / 12.0 + self.drift_cents / 1200.0))
-            .clamp(1.0, 0.45 * self.sr);
+        let hz = crate::drift::safe_hz(
+            self.base_hz * 2.0_f32.powf(st / 12.0 + self.drift_cents / 1200.0),
+            self.sr,
+        );
         self.osc.set_frequency(hz);
         let body = self.osc.next_sample() * self.amp.next();
         let click = self.click_noise.next(NoiseType::White) * self.click_env.next() * self.click_level;

@@ -72,10 +72,13 @@ impl Resonator {
             return;
         }
         // Clamp below Nyquist at the API boundary (defense-in-depth; recompute
-        // also clamps) so the stored config reflects the safe value.
-        self.freq[i] = freq.clamp(0.0, 0.49 * self.sr);
-        self.decay_ms[i] = decay_ms.max(0.1);
-        self.gain[i] = gain;
+        // also clamps) so the stored config reflects the safe value. Fold any
+        // non-finite param to a safe default first: `gain` is applied OUTSIDE the
+        // per-sample flush (see `process`), so a NaN gain would otherwise make the
+        // output non-finite forever. Finite inputs are unchanged (golden-safe).
+        self.freq[i] = if freq.is_finite() { freq.clamp(0.0, 0.49 * self.sr) } else { 0.0 };
+        self.decay_ms[i] = if decay_ms.is_finite() { decay_ms.max(0.1) } else { 0.1 };
+        self.gain[i] = if gain.is_finite() { gain } else { 0.0 };
         self.recompute(i);
     }
 
@@ -101,6 +104,23 @@ impl Resonator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_partial_nan_params_stay_finite() {
+        // Regression: `gain` is applied OUTSIDE the per-sample flush, so a
+        // non-finite gain/freq/decay would poison the output forever. The fold
+        // in set_partial must keep it finite. (Fails on the unguarded gain path.)
+        let mut r = Resonator::new(48_000.0);
+        r.set_count(MAX_PARTIALS);
+        for i in 0..MAX_PARTIALS {
+            r.set_partial(i, f32::NAN, f32::INFINITY, f32::NAN);
+        }
+        r.reset();
+        r.process(1.0); // strike
+        for _ in 0..4_000 {
+            assert!(r.process(0.0).is_finite(), "resonator must stay finite with NaN params");
+        }
+    }
 
     #[test]
     fn impulse_rings_oscillates_and_decays() {
