@@ -279,6 +279,14 @@ fn ratchet_velocity(base: f32, k: u8, n: u8, ramp: i8) -> f32 {
     (base * mult).clamp(0.0, 1.0)
 }
 
+// Fixed-size scheduling rings (no audio-thread allocation). `pending` holds the
+// hits firing within the current block; `carry` defers ratchet/swing spillover
+// that lands past the block boundary to the next block. Supported host block
+// size: up to 8192 frames is verified to keep headroom in both rings even with
+// the densest pattern the editor allows (12 tracks x 64 steps x ratchet 8) at
+// 140 BPM — see `dense_ratchets_dont_overflow_large_blocks`. Larger blocks would
+// need sub-block chunking (a later refinement); the overflow path drops a hit
+// (release) / debug_asserts (debug) rather than allocating.
 const MAX_PENDING: usize = 256;
 const MAX_CARRY: usize = 128;
 
@@ -844,6 +852,56 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dense_ratchets_dont_overflow_large_blocks() {
+        // The pending/carry rings are fixed-size (MAX_PENDING=256, MAX_CARRY=128,
+        // no audio-thread alloc). A pathologically dense pattern — all 12 tracks,
+        // all 64 steps on, max ratchet — at large host blocks must NOT overflow
+        // them: the overflow path silently drops a hit (release) / debug_asserts
+        // (here). We assert the ring never even FILLS (peak < cap) at the supported
+        // max block size, so there is real headroom. Pins: blocks up to 8192
+        // frames are safe at 140 BPM with the densest pattern the editor allows.
+        fn build() -> Sequencer {
+            let mut s = Sequencer::new();
+            for t in 0..MAX_TRACKS {
+                for step in 0..MAX_STEPS {
+                    s.set_step_params(t, step, true, 110, false, 100, 8, 0, TrigCondition::Always);
+                }
+            }
+            s.set_playing(true);
+            s
+        }
+        // Peak pending-ring occupancy over 8 bars (several pattern loops) at a
+        // given host block size. A panic here = a ring overflowed (dropped hit).
+        fn peak_pending(block: usize) -> usize {
+            let mut s = build();
+            let sr = 48_000.0_f64;
+            let tempo = 140.0_f64;
+            let qn_per_block = (block as f64 / sr) * (tempo / 60.0);
+            let mut pos_qn = 0.0;
+            let mut hi = 0;
+            while pos_qn < 32.0 {
+                s.process_block(pos_qn, tempo, sr, block);
+                hi = hi.max(s.pending().len());
+                assert!(
+                    s.pending().len() < MAX_PENDING,
+                    "pending ring filled (peak={}) at block={block} — a hit could drop",
+                    s.pending().len()
+                );
+                assert!(s.carry_len < MAX_CARRY, "carry ring filled at block={block}");
+                pos_qn += qn_per_block;
+            }
+            hi
+        }
+        assert!(peak_pending(64) > 0, "the dense pattern must emit triggers");
+        let hi4k = peak_pending(4096);
+        let hi8k = peak_pending(8192);
+        assert!(
+            hi4k < MAX_PENDING && hi8k < MAX_PENDING,
+            "rings must keep headroom at the documented max block size (4k peak={hi4k}, 8k peak={hi8k})"
+        );
+    }
 
     #[test]
     fn export_import_round_trips_the_bank() {

@@ -1727,6 +1727,136 @@ mod tests {
         }
     }
 
+    #[test]
+    fn factory_world_rows_decode_to_active_targets() {
+        // A static guard: a mis-numbered factory row (a src/dst that decodes to
+        // Off, an out-of-range track/field/bus id) would silently do nothing.
+        // Catch it before ship.
+        use kits::KitRow;
+        for kit in kits::FACTORY_KITS {
+            for row in kit.rows {
+                match *row {
+                    KitRow::Voice { track, param, .. } => {
+                        assert!((track as usize) < MAX_TRACKS, "{}: Voice track OOB", kit.id);
+                        assert!((param as usize) < N_TAIL_PARAMS, "{}: Voice param OOB", kit.id);
+                    }
+                    KitRow::Mix { track, field, .. } => {
+                        assert!((track as usize) < MAX_TRACKS, "{}: Mix track OOB", kit.id);
+                        assert!(field <= 9, "{}: Mix field OOB", kit.id);
+                    }
+                    KitRow::ModSlot { slot, src, dst, voice, .. } => {
+                        assert!((slot as usize) < 16, "{}: ModSlot index OOB", kit.id);
+                        assert_ne!(
+                            DrumModSource::from_index(src as usize),
+                            DrumModSource::Off,
+                            "{}: ModSlot src decodes to Off (inert route)",
+                            kit.id
+                        );
+                        assert_ne!(
+                            DrumModDest::from_index(dst as usize),
+                            DrumModDest::Off,
+                            "{}: ModSlot dst decodes to Off (inert route)",
+                            kit.id
+                        );
+                        assert!(
+                            voice == 0xFF || (voice as usize) < MAX_TRACKS,
+                            "{}: ModSlot target_voice OOB",
+                            kit.id
+                        );
+                    }
+                    KitRow::Lfo { idx, .. } => assert!(idx <= 1, "{}: Lfo idx OOB", kit.id),
+                    KitRow::ModEnv { attack, decay } => assert!(
+                        attack.is_finite() && attack >= 0.0 && decay.is_finite() && decay >= 0.0,
+                        "{}: ModEnv times must be finite + non-negative",
+                        kit.id
+                    ),
+                    KitRow::Bus { id, .. } => {
+                        assert!((1..=9).contains(&id), "{}: Bus id {id} out of 1..=9", kit.id)
+                    }
+                    KitRow::Sidechain(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_factory_world_renders_finite_and_bounded() {
+        // Recall each factory kit exactly as the audio driver does (stage_kit ->
+        // adopt_state -> bus rows -> mod fan-in -> sequencer -> render) and run a
+        // couple of bars with the macros at both rails. Every sample must be
+        // finite + bus-limited, and a GROOVE WORLD must actually make sound.
+        let sr = 48_000.0_f32;
+        for kit in kits::FACTORY_KITS {
+            for macros in [[0.0_f32; 8], [1.0_f32; 8]] {
+                let mut state = PersistState::default();
+                let staged = stage_kit(&mut state, kit);
+
+                let mut dk = DrumKit::neutral(sr);
+                let mut seq = Sequencer::new();
+                let mut me = ModEngine::new(sr);
+                let mut macros = macros;
+                adopt_state(&mut dk, &mut seq, &mut me, &mut macros, &state, true);
+
+                // Drive the staged bus FX through the kit setters (the audio driver
+                // routes these via host params; here applied directly).
+                if let Some(v) = staged.bus[1] { dk.set_pump(v); }
+                if let Some(v) = staged.bus[2] { dk.set_bus_drive(v); }
+                if let Some(v) = staged.bus[3] { dk.set_bus_reverb(v); }
+                if let Some(v) = staged.bus[4] { dk.set_bus_delay(v); }
+                if let Some(v) = staged.bus[5] { dk.set_pump_rate(v); }
+                if let Some(v) = staged.bus[6] { dk.set_pump_curve(v); }
+                if let Some(v) = staged.bus[7] { dk.set_bus_parallel(v); }
+                if let Some(v) = staged.bus[8] { dk.set_bus_transient(v); }
+                if let Some(v) = staged.bus[9] { dk.set_gate_time(v * 200.0); }
+                dk.set_bus_tempo(120.0);
+
+                seq.set_playing(true);
+                let block = 512usize;
+                let tempo = 120.0_f64;
+                let qn_per_block = (block as f64 / sr as f64) * (tempo / 60.0);
+                let mut pos_qn = 0.0_f64;
+                let mut peak = 0.0_f32;
+                let mut made_sound = false;
+                while pos_qn < 8.0 {
+                    // 2 bars
+                    me.advance(block);
+                    dk.set_mod_globals(me.lfo1(), me.lfo2(), me.mod_env());
+                    dk.set_mod_wheel(1.0);
+                    dk.set_macros(macros);
+                    seq.process_block(pos_qn, tempo, sr as f64, block);
+                    let pending = seq.pending();
+                    let mut ti = 0;
+                    for i in 0..block {
+                        while ti < pending.len() {
+                            let trg = pending[ti];
+                            if trg.offset as usize > i {
+                                break;
+                            }
+                            dk.trigger_seq(&trg);
+                            ti += 1;
+                        }
+                        let (l, r) = dk.render();
+                        assert!(
+                            l.is_finite() && r.is_finite(),
+                            "world {} rendered non-finite (macros={:?})",
+                            kit.id,
+                            macros[0]
+                        );
+                        peak = peak.max(l.abs()).max(r.abs());
+                        if l.abs() > 1e-3 || r.abs() > 1e-3 {
+                            made_sound = true;
+                        }
+                    }
+                    pos_qn += qn_per_block;
+                }
+                assert!(peak <= 1.02, "world {} exceeded the limiter: peak={peak}", kit.id);
+                if kit.pattern.is_some() {
+                    assert!(made_sound, "GROOVE WORLD {} produced no sound", kit.id);
+                }
+            }
+        }
+    }
+
     /// The real persistence path: program a bank, JSON round-trip the persisted
     /// blob (exactly what `nih-plug` serializes into the host project), and
     /// confirm every kind of programming survives — including the `[Step; 64]`
