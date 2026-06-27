@@ -131,6 +131,13 @@
   .preset-card .p-name { font-family: var(--mono); font-size: 10px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .preset-card .p-del { font-family: var(--mono); font-size: 11px; color: var(--dim-3); padding: 0 4px; cursor: default; }
   .preset-card .p-del:hover { color: #d9694a; }
+  .ab-bar { display: flex; align-items: center; gap: 7px; margin-bottom: 14px; }
+  .ab-lbl { font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; color: var(--dim-3); margin-right: 4px; }
+  .ab-sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
+  .ab-bar button { font-family: var(--mono); font-size: 9px; letter-spacing: 0.5px; color: var(--dim); background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 5px 9px; cursor: default; }
+  .ab-bar button:hover { border-color: rgba(224,163,62,0.4); }
+  .ab-tog { width: 30px; }
+  .ab-tog.on { color: var(--accent); border-color: var(--accent); background: rgba(224,163,62,0.10); }
   .insp { width: 232px; flex: 0 0 232px; background: var(--panel-2); border-left: 1px solid var(--border); padding: 11px 12px; overflow-y: auto; font-size: 11px; }
   .insp h4 { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; margin: 12px 0 7px; }
   .insp h4:first-child { margin-top: 0; }
@@ -219,6 +226,15 @@
       </div>
       <div class="kits-wrap" id="kitsView" style="display:none">
         <div class="voice-h">KITS · GROOVE WORLDS — recall the whole machine in one touch</div>
+        <div class="ab-bar">
+          <span class="ab-lbl">A / B COMPARE</span>
+          <button class="ab-store" data-slot="0">STORE A</button>
+          <button class="ab-store" data-slot="1">STORE B</button>
+          <span class="ab-sep"></span>
+          <button class="ab-tog on" id="abA" data-slot="0">A</button>
+          <button class="ab-tog" id="abB" data-slot="1">B</button>
+          <button class="ab-copy" id="abCopy" title="copy the active register to the other">⇄</button>
+        </div>
         <div class="kits-grid" id="kitsGrid"></div>
         <div class="kits-ph">USER PRESETS</div>
         <div class="kits-saverow">
@@ -765,6 +781,18 @@
     const name = (el.value || "").trim();
     if (name) { send({ type: "preset-save", name }); el.value = ""; }
   });
+  // A/B compare bar.
+  function setAbActive(slot) {
+    document.getElementById("abA").classList.toggle("on", slot === 0);
+    document.getElementById("abB").classList.toggle("on", slot === 1);
+  }
+  document.querySelectorAll(".ab-store").forEach(b => b.addEventListener("click", () => {
+    const slot = +b.dataset.slot; send({ type: "ab-store", slot }); setAbActive(slot);
+  }));
+  document.querySelectorAll(".ab-tog").forEach(b => b.addEventListener("click", () => {
+    const slot = +b.dataset.slot; send({ type: "ab-recall", slot }); setAbActive(slot);
+  }));
+  document.getElementById("abCopy").addEventListener("click", () => send({ type: "ab-copy" }));
 
   // ---- playhead + status ----
   function setPlayhead(col) {

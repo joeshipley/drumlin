@@ -95,6 +95,9 @@ enum Action {
     PresetSave { name: String },
     PresetLoad { name: String },
     PresetDelete { name: String },
+    AbStore { slot: u8 },
+    AbRecall { slot: u8 },
+    AbCopy,
     Transport { play: bool },
     SeqEnable { on: bool },
     SidechainEnable { on: bool },
@@ -677,6 +680,52 @@ fn full_json(
     msg
 }
 
+/// A portable SOUND snapshot (the same fields a disk preset stores). The carrier
+/// for preset load + A/B compare: capture the current sound, or apply one.
+#[derive(Clone)]
+struct SoundSnapshot {
+    voices: VoicePatch,
+    mix: VoiceMix,
+    mod_state: ModState,
+    macro_labels: [String; 8],
+    bus: [f32; 9],
+    sidechain: bool,
+}
+
+/// Snapshot the current sound (state + bus params + sidechain).
+fn snapshot_current(s: &PersistState, params: &DrumlinParams) -> SoundSnapshot {
+    SoundSnapshot {
+        voices: s.voices.clone(),
+        mix: s.mix.clone(),
+        mod_state: s.mod_state.clone(),
+        macro_labels: s.macro_labels.clone(),
+        bus: bus_values(params),
+        sidechain: params.sidechain_key.value(),
+    }
+}
+
+/// Replace the SOUND fields of `state` from a snapshot (keeping the pattern bank)
+/// and return the full GUI re-seed. The bus + sidechain are driven by the caller
+/// via the param gesture bridge.
+fn apply_sound(state: &mut PersistState, snap: &SoundSnapshot, user_presets: &[String]) -> serde_json::Value {
+    state.voices = snap.voices.clone();
+    state.mix = snap.mix.clone();
+    state.mod_state = snap.mod_state.clone();
+    state.macro_labels = snap.macro_labels.clone();
+    full_json(
+        &state.seq, &state.voices, &state.mix, &state.mod_state, &state.macro_labels,
+        &snap.bus, snap.sidechain, user_presets,
+    )
+}
+
+/// The two A/B compare registers + which is active (editor-local; not persisted).
+#[derive(Default)]
+struct AbState {
+    a: Option<SoundSnapshot>,
+    b: Option<SoundSnapshot>,
+    active: u8, // 0 = A, 1 = B
+}
+
 impl Plugin for Drumlin {
     const NAME: &'static str = "Drumlin";
     const VENDOR: &'static str = "Joe Shipley";
@@ -728,6 +777,9 @@ impl Plugin for Drumlin {
         let effective_playing = self.effective_playing.clone();
         let seq_enabled = self.seq_enabled.clone();
         let recall_pending = self.recall_pending.clone();
+        // A/B compare registers, editor-local (Arc<Mutex> like last_status, since
+        // the event-loop closure is Send). Not persisted — a session tool.
+        let ab = Arc::new(Mutex::new(AbState::default()));
         // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
         // unchanged status sends.
         let last_status = Arc::new(AtomicU32::new(u32::MAX));
@@ -766,6 +818,29 @@ impl Plugin for Drumlin {
                         if let Some(tx) = tx.as_mut() {
                             let _ = tx.push($e);
                         }
+                    }
+                }};
+            }
+            // Apply a SoundSnapshot: replace the sound (keep the bank), drive the
+            // bus + sidechain host params, signal the audio thread, re-seed the GUI.
+            // Shared by preset load + A/B recall (captures setter/ctx/params here).
+            macro_rules! apply_snap {
+                ($snap:expr) => {{
+                    let snap = $snap;
+                    let plist = presets::list();
+                    let msg = params.state.lock().ok().map(|mut s| apply_sound(&mut s, &snap, &plist));
+                    if let Some(msg) = msg {
+                        for bid in 1u8..=9 {
+                            let p = pget!(bid);
+                            setter.begin_set_parameter(p);
+                            setter.set_parameter_normalized(p, snap.bus[(bid - 1) as usize]);
+                            setter.end_set_parameter(p);
+                        }
+                        setter.begin_set_parameter(&params.sidechain_key);
+                        setter.set_parameter(&params.sidechain_key, snap.sidechain);
+                        setter.end_set_parameter(&params.sidechain_key);
+                        recall_pending.store(true, Ordering::Relaxed);
+                        ctx.send_json(msg);
                     }
                 }};
             }
@@ -935,33 +1010,49 @@ impl Plugin for Drumlin {
                         ctx.send_json(json!({ "type": "presets", "presets": presets::list() }));
                     }
                     Action::PresetLoad { name } => {
-                        if let Some(preset) = presets::load(&name) {
-                            // A preset replaces the SOUND only (voices/mix/mod/labels),
-                            // leaving the project's pattern bank. Re-seed the GUI from
-                            // the loaded sound + the (unchanged) current bank.
-                            let plist = presets::list();
-                            let msg = params.state.lock().ok().map(|mut s| {
-                                s.voices = preset.voices;
-                                s.mix = preset.mix;
-                                s.mod_state = preset.mod_state;
-                                s.macro_labels = preset.macro_labels;
-                                full_json(
-                                    &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
-                                    &preset.bus, preset.sidechain, &plist,
-                                )
+                        // A preset replaces the SOUND only (keeps the pattern bank).
+                        if let Some(p) = presets::load(&name) {
+                            apply_snap!(SoundSnapshot {
+                                voices: p.voices,
+                                mix: p.mix,
+                                mod_state: p.mod_state,
+                                macro_labels: p.macro_labels,
+                                bus: p.bus,
+                                sidechain: p.sidechain,
                             });
-                            if let Some(msg) = msg {
-                                for bid in 1u8..=9 {
-                                    let p = pget!(bid);
-                                    setter.begin_set_parameter(p);
-                                    setter.set_parameter_normalized(p, preset.bus[(bid - 1) as usize]);
-                                    setter.end_set_parameter(p);
+                        }
+                    }
+                    Action::AbStore { slot } => {
+                        // Capture the current sound into register A (0) or B (1).
+                        if let Ok(s) = params.state.lock() {
+                            let snap = snapshot_current(&s, &params);
+                            if let Ok(mut ab) = ab.lock() {
+                                if slot == 0 {
+                                    ab.a = Some(snap);
+                                } else {
+                                    ab.b = Some(snap);
                                 }
-                                setter.begin_set_parameter(&params.sidechain_key);
-                                setter.set_parameter(&params.sidechain_key, preset.sidechain);
-                                setter.end_set_parameter(&params.sidechain_key);
-                                recall_pending.store(true, Ordering::Relaxed);
-                                ctx.send_json(msg);
+                                ab.active = slot;
+                            }
+                        }
+                    }
+                    Action::AbRecall { slot } => {
+                        // Apply register A/B if it has been captured.
+                        let snap = ab.lock().ok().and_then(|mut ab| {
+                            ab.active = slot;
+                            if slot == 0 { ab.a.clone() } else { ab.b.clone() }
+                        });
+                        if let Some(snap) = snap {
+                            apply_snap!(snap);
+                        }
+                    }
+                    Action::AbCopy => {
+                        // Copy the active register into the other (A<->B).
+                        if let Ok(mut ab) = ab.lock() {
+                            if ab.active == 0 {
+                                ab.b = ab.a.clone();
+                            } else {
+                                ab.a = ab.b.clone();
                             }
                         }
                     }
