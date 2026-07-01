@@ -86,8 +86,8 @@ pub static MARSEILLE: Kit = Kit {
     name: "Marseille",
     blurb: "French 79 · 808 half-time",
     rows: &[
-        KitRow::Bus { id: 4, norm: 0.42 },  // tape delay
-        KitRow::Bus { id: 3, norm: 0.26 },  // room
+        KitRow::Bus { id: 4, norm: 0.30 },  // tape delay (was 0.42 — was smearing)
+        KitRow::Bus { id: 3, norm: 0.16 },  // room kept subtle; per-voice sends do the work
         KitRow::Bus { id: 1, norm: 0.32 },  // gentle pump
         KitRow::Bus { id: 2, norm: 0.12 },
         KitRow::Mix { track: 4, field: 1, norm: 0.6 }, // rim -> Send B (delay)
@@ -123,19 +123,19 @@ pub static BLADERUNNER: Kit = Kit {
     name: "Bladerunner",
     blurb: "Vangelis · cavernous toms",
     rows: &[
-        KitRow::Bus { id: 3, norm: 0.62 },  // big reverb (the cavern)
-        KitRow::Bus { id: 4, norm: 0.22 },  // delay haze
+        // The cavern comes from TARGETED tom sends (below), not a global wash —
+        // the kick/ride stay dry + present. Room kept low; toms carry the space.
+        KitRow::Bus { id: 3, norm: 0.22 },  // was 0.62 — global room was drowning everything
+        KitRow::Bus { id: 4, norm: 0.18 },  // delay haze
         KitRow::Bus { id: 9, norm: 0.6 },   // long gate time
-        KitRow::Mix { track: 8, field: 0, norm: 0.6 }, // tom lo -> reverb
-        KitRow::Mix { track: 9, field: 0, norm: 0.6 }, // tom hi -> reverb
-        // A slow LFO 1 evolves the cutoff across all voices.
+        KitRow::Mix { track: 8, field: 0, norm: 0.7 }, // tom lo -> reverb (the cavern voices)
+        KitRow::Mix { track: 9, field: 0, norm: 0.7 }, // tom hi -> reverb
+        // ONE slow filter sweep is atmospheric; three stacked ones just dull the
+        // whole kit. Keep the slow LFO evolve + hand control, drop the env stack.
         KitRow::Lfo { idx: 0, shape: 0, rate: 0.4, depth: 1.0, retrig: false },
-        KitRow::ModSlot { slot: 0, src: 3, dst: 3, depth: 0.45, voice: 0xFF }, // Lfo1 -> Cutoff
-        // K3 "Evolve" rides cutoff too (hand control over the sweep).
-        KitRow::ModSlot { slot: 1, src: 15, dst: 3, depth: 0.4, voice: 0xFF }, // Macro3 -> Cutoff
-        // A slow mod-env blooms the filter open at the top of playback.
-        KitRow::ModEnv { attack: 0.4, decay: 2.0 },
-        KitRow::ModSlot { slot: 2, src: 5, dst: 3, depth: 0.3, voice: 0xFF }, // ModEnv -> Cutoff
+        KitRow::ModSlot { slot: 0, src: 3, dst: 3, depth: 0.28, voice: 0xFF }, // Lfo1 -> Cutoff (gentler)
+        // K3 "Evolve" rides cutoff by hand (a touch, not a rail).
+        KitRow::ModSlot { slot: 1, src: 15, dst: 3, depth: 0.25, voice: 0xFF }, // Macro3 -> Cutoff
     ],
     macro_labels: ["Space", "Decay", "Evolve", "Drive", "Filter", "Width", "Pump", "Lo-Fi"],
     pattern: Some(bladerunner_groove),
@@ -162,7 +162,7 @@ pub static OUTRUN: Kit = Kit {
     name: "Outrun",
     blurb: "80s gated · synthwave",
     rows: &[
-        KitRow::Bus { id: 3, norm: 0.45 },  // gated reverb space
+        KitRow::Bus { id: 3, norm: 0.18 },  // global room subtle; the snare's gated verb is the 80s space (was 0.45)
         KitRow::Bus { id: 9, norm: 0.3 },   // short gate (the snap)
         KitRow::Bus { id: 8, norm: 0.4 },   // transient punch
         KitRow::Bus { id: 2, norm: 0.28 },  // drive

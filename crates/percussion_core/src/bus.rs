@@ -40,6 +40,11 @@ use synth_core::{
     ReverbAlgo, TransientShaper,
 };
 
+/// How much of the dry mix the global SPACE knob feeds the reverb at full. <1.0
+/// so "room up" is tasteful ambience rather than a wash; per-voice Send A is
+/// unaffected (deliberate reverb on chosen voices stays at full send).
+const SPACE_SEND_TRIM: f32 = 0.6;
+
 /// Post-fader per-voice send sums from the kit, feeding the bus returns. Split so
 /// gated-verb voices route to the *gated* reverb separately from the normal one.
 #[derive(Clone, Copy, Default)]
@@ -207,11 +212,11 @@ impl DrumBus {
         self.reverb.set_params(
             self.reverb_engaged(),
             ReverbAlgo::Plate224,
-            1.6,    // decay s
+            1.3,    // decay s — shorter so tails don't pile up into a wash
             0.5,    // size
-            0.0,    // predelay
+            0.028,  // predelay s — 28ms of dry-first air separates transients from the tail (clarity)
             0.4,    // damping
-            150.0,  // locut
+            300.0,  // locut Hz — keep the kick/sub/low body OUT of the tail (the big de-mud)
             8500.0, // hicut
             0.2,    // modulation
             1.0,    // width
@@ -398,8 +403,12 @@ impl DrumBus {
         }
         // --- normal reverb send return (Send A + global SPACE) ---
         if self.reverb_engaged() {
-            let in_l = s.reverb_l + dl * self.reverb_amt;
-            let in_r = s.reverb_r + dr * self.reverb_amt;
+            // The global SPACE knob feeds the WHOLE dry mix into the plate, so it
+            // washes fast; scale it back to ~0.6 so "room up" is ambience, not a
+            // drowning. Deliberate per-voice Send A (s.reverb_l/r) stays at full —
+            // that's how a world puts reverb on the snare/perc but not the kick.
+            let in_l = s.reverb_l + dl * self.reverb_amt * SPACE_SEND_TRIM;
+            let in_r = s.reverb_r + dr * self.reverb_amt * SPACE_SEND_TRIM;
             let (wet_l, wet_r) = self.reverb.process_wet_send(in_l, in_r);
             out_l += wet_l;
             out_r += wet_r;
