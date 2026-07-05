@@ -89,6 +89,10 @@ impl TomVoice {
     }
 
     pub fn trigger(&mut self, velocity: f32, accent: bool) {
+        // Re-bake the baked params first: a prior choke() shortened the shell
+        // partial's decay, and this restores the natural ring. Unchoked, apply()
+        // recomputes bit-identical coefficients (the snare's pattern) — golden-safe.
+        self.apply();
         self.osc.reset();
         self.shell.reset();
         self.pitch.trigger();
@@ -118,6 +122,10 @@ impl TomVoice {
     pub fn choke(&mut self) {
         self.amp.choke(8.0);
         self.exciter.choke(2.0);
+        // The shell resonator rings freely (it is not gated by the amp env) —
+        // re-bake its partial to an 8ms decay so the choke actually silences the
+        // modal ring too. trigger() restores the natural decay via apply().
+        self.shell.set_partial(0, self.base_hz * 1.5, 8.0, 0.5);
     }
 
     pub fn is_active(&self) -> bool {

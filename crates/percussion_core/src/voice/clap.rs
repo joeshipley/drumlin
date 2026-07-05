@@ -60,8 +60,10 @@ impl ClapVoice {
     }
 
     pub fn choke(&mut self) {
-        self.diff_l.reset();
-        self.diff_r.reset();
+        // Fast fade, not a hard reset — zeroing the diffusers mid-burst stepped
+        // full-scale noise to silence in one sample (an audible click).
+        self.diff_l.choke();
+        self.diff_r.choke();
     }
 
     pub fn is_active(&self) -> bool {

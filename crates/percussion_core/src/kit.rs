@@ -820,7 +820,9 @@ impl DrumKit {
         self.bus.pump_envelope()
     }
 
-    /// Panic-reset: silence every voice and clear filter/tail state.
+    /// Panic-reset: silence every voice, clear filter/tail state, and flush the
+    /// bus's audio memory (reverb/delay tails, gate) — the KIT-recall tail-cut
+    /// and host reset both rely on this actually cutting EVERYTHING.
     pub fn reset(&mut self) {
         for v in &mut self.voices {
             v.reset();
@@ -828,6 +830,7 @@ impl DrumKit {
         for t in &mut self.tails {
             t.reset();
         }
+        self.bus.reset();
     }
 }
 

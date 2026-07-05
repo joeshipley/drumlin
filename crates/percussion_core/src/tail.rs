@@ -198,6 +198,12 @@ impl VoiceTail {
         self.lp_r.reset();
         self.eq_l.reset();
         self.eq_r.reset();
+        // Drive has no reset() in synth_core (read-only); set_sample_rate is its
+        // documented state-clear (tone filter + oversampler memory), leaving
+        // params untouched — otherwise the previous hit's residue colors the
+        // first samples after a panic reset / KIT recall.
+        self.drive_l.set_sample_rate(self.sr);
+        self.drive_r.set_sample_rate(self.sr);
     }
 }
 

@@ -96,6 +96,12 @@ pub struct DrumBus {
     send_a_active: bool, // any voice routes to the normal reverb send
     gated_active: bool,  // any voice routes to the gated reverb send
     send_b_active: bool, // any voice routes to the delay send
+    // Disengage-edge trackers: a disengaged return is no longer processed, so
+    // its buffers FREEZE with the old tail; clear on the engaged->off edge so a
+    // later re-engage doesn't replay stale audio (the gated return already did
+    // this in set_send_active — these cover the normal reverb + delay).
+    reverb_was_on: bool,
+    delay_was_on: bool,
 }
 
 impl DrumBus {
@@ -127,6 +133,8 @@ impl DrumBus {
             send_a_active: false,
             gated_active: false,
             send_b_active: false,
+            reverb_was_on: false,
+            delay_was_on: false,
         };
         bus.configure();
         bus
@@ -206,6 +214,15 @@ impl DrumBus {
     }
 
     fn apply_reverb(&mut self) {
+        // Disengaged -> the return is skipped in process_with_sends and its FDN
+        // freezes mid-tail; clear on the off edge so re-engaging SPACE later
+        // doesn't fade in a ghost of an old hit. (clear() is a bounded pure
+        // write over pre-allocated buffers — RT-safe.)
+        let on = self.reverb_engaged();
+        if self.reverb_was_on && !on {
+            self.reverb.clear();
+        }
+        self.reverb_was_on = on;
         // Reverb is a wet-only SEND return now (process_wet_send): on whenever
         // engaged, fed a send sum upstream, return at unity. The per-voice Send A
         // and the global SPACE amount scale the input, not this.
@@ -251,6 +268,14 @@ impl DrumBus {
     }
 
     fn apply_delay(&mut self) {
+        // Same disengage-edge scrub as the reverb: a skipped delay's ring buffer
+        // holds up to seconds of old audio verbatim; clear it on the off edge so
+        // turning DELAY up later doesn't replay a stale echo.
+        let on = self.delay_engaged();
+        if self.delay_was_on && !on {
+            self.delay.clear();
+        }
+        self.delay_was_on = on;
         self.delay.set_tempo(self.tempo);
         // 1/8 on the left, dotted-ish on the right for a wide tempo-synced echo.
         let eighth = (60.0 / self.tempo.max(1.0)) * 0.5;
@@ -342,6 +367,21 @@ impl DrumBus {
     pub fn set_gate_time(&mut self, ms: f32) {
         self.gate_time = ms.clamp(20.0, 400.0);
         self.apply_gate();
+    }
+
+    /// Panic-reset the bus's audio memory: reverb/delay tails, the gate, and the
+    /// transient shapers. The kit's `reset()` (host reset / KIT-recall tail-cut)
+    /// calls this so the OLD sound's echoes don't ring into the new one. All pure
+    /// bounded writes over pre-allocated buffers (RT-safe). Comp/pump envelopes
+    /// have no reset in synth_core, but their time constants are milliseconds —
+    /// they settle within a block.
+    pub fn reset(&mut self) {
+        self.reverb.clear();
+        self.reverb_gated.clear();
+        self.delay.clear();
+        self.gate.reset();
+        self.transient_l.reset();
+        self.transient_r.reset();
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {

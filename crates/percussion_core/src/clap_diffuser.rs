@@ -22,6 +22,11 @@ pub struct ClapDiffuser {
     burst_coef: f32,
     tail_at: u32,
     tail_coef: f32,
+    /// The configured (un-choked) coefficients. `choke()` swaps the live coefs
+    /// for a fast fade; `trigger()` restores from here (identical bits when
+    /// never choked — a no-op).
+    burst_coef_nat: f32,
+    tail_coef_nat: f32,
     env: f32,
     tail_env: f32,
     tail_level: f32,
@@ -43,6 +48,8 @@ impl ClapDiffuser {
             burst_coef: 0.99,
             tail_at: 0,
             tail_coef: 0.999,
+            burst_coef_nat: 0.99,
+            tail_coef_nat: 0.999,
             env: 0.0,
             tail_env: 0.0,
             tail_level: 0.55,
@@ -75,6 +82,8 @@ impl ClapDiffuser {
         let td = (90.0 * 0.001 * self.sr).max(1.0);
         self.burst_coef = (0.001_f32).powf(1.0 / bd);
         self.tail_coef = (0.001_f32).powf(1.0 / td);
+        self.burst_coef_nat = self.burst_coef;
+        self.tail_coef_nat = self.tail_coef;
     }
 
     pub fn trigger(&mut self) {
@@ -82,6 +91,25 @@ impl ClapDiffuser {
         self.env = 0.0;
         self.tail_env = 0.0;
         self.active = true;
+        // Restore the configured decays: a prior choke() shortened only the
+        // burst it interrupted, never this hit.
+        self.burst_coef = self.burst_coef_nat;
+        self.tail_coef = self.tail_coef_nat;
+    }
+
+    /// Choke-group fade: ~4 ms exponential ramp to silence instead of a hard
+    /// cut (every other engine fades via `DahdEnv::choke`; zeroing the envs here
+    /// would step full-scale noise to zero between two samples — a click).
+    /// Jumping `t` past `tail_at` disarms the burst/tail re-kicks, and lets the
+    /// deactivation check retire the voice once the fade lands.
+    pub fn choke(&mut self) {
+        if self.active {
+            let d = (4.0 * 0.001 * self.sr).max(1.0);
+            let fast = (0.001_f32).powf(1.0 / d);
+            self.burst_coef = fast;
+            self.tail_coef = fast;
+            self.t = self.tail_at.saturating_add(1);
+        }
     }
 
     pub fn reset(&mut self) {

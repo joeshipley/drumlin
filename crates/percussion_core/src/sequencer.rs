@@ -152,21 +152,34 @@ impl Step {
         &self.plocks[..(self.plock_count as usize).min(MAX_PLOCKS)]
     }
 
+    /// Heal a deserialized `plock_count` that exceeds the array (a corrupt host
+    /// chunk / hand-edited preset would otherwise panic the audio-thread write
+    /// paths below; every legitimate count is <= MAX_PLOCKS, so this is an
+    /// identity on healthy state).
+    #[inline]
+    fn heal_plock_count(&mut self) -> usize {
+        let n = (self.plock_count as usize).min(MAX_PLOCKS);
+        self.plock_count = n as u8;
+        n
+    }
+
     /// Add a parameter lock (replacing one for the same param, or appending).
     pub fn set_plock(&mut self, param: u16, value: f32) {
-        for i in 0..self.plock_count as usize {
+        let n = self.heal_plock_count();
+        for i in 0..n {
             if self.plocks[i].param == param {
                 self.plocks[i].value = value;
                 return;
             }
         }
-        if (self.plock_count as usize) < MAX_PLOCKS {
-            self.plocks[self.plock_count as usize] = PLock { param, value };
+        if n < MAX_PLOCKS {
+            self.plocks[n] = PLock { param, value };
             self.plock_count += 1;
         }
     }
 
     pub fn clear_plock(&mut self, param: u16) {
+        self.heal_plock_count();
         let mut i = 0;
         while i < self.plock_count as usize {
             if self.plocks[i].param == param {
@@ -219,6 +232,9 @@ pub struct Pattern {
     pub groove_amount: u8, // 0..=100
     pub humanize: u8,      // 0..=100 seeded timing + velocity jitter
     pub seed: u32,         // per-pattern PRNG seed -> GROOVE LOCK
+    /// LEGACY (kept for persisted-state layout compatibility only): fill is
+    /// `Sequencer::fill_held` now — live performance state, never pattern data.
+    /// No longer read; `export_into` scrubs it to false.
     pub fill_active: bool,
 }
 
@@ -346,8 +362,32 @@ pub struct Sequencer {
     /// Pattern queued to switch in at the next loop boundary (song chaining).
     queued: Option<usize>,
     playing: bool,
+    /// FILL is live performance state (the held button), NOT pattern data: it
+    /// must survive pattern switches and never persist. (It used to live on
+    /// `Pattern.fill_active`, which leaked into the bank on every switch and
+    /// into saved projects — a held fill died at a queued switch, and a slot
+    /// could reload with fill invisibly stuck on.)
+    fill_held: bool,
+    /// The absolute step at which the CURRENT pattern was entered (0 until a
+    /// queued switch commits). Loop index, step index, and the swing grid are
+    /// all computed relative to this, so a switched-in pattern starts at ITS
+    /// step 0 with loop 0 (`First` fires, swing parity holds). Transient
+    /// playback state — never persisted; reset on relocate.
+    epoch_fl: i64,
+    /// Per-track absolute step already fired EARLY by the negative-offset
+    /// lookahead (`i64::MIN` = none): a step whose net timing offset is
+    /// negative (micro pulled ahead / the rushed half of humanize) is scheduled
+    /// one boundary ahead of its own, and its own boundary pass consumes this
+    /// marker instead of firing it again.
+    early_fired: [i64; MAX_TRACKS],
     /// Continuous absolute step position (re-anchored to the host each block).
     playhead_steps: f64,
+    /// The host step position at the previous block's start. Backward-relocate
+    /// detection compares host-to-host (monotone even through a ritardando —
+    /// the block-start-tempo EXTRAPOLATION overshoots a decelerating host by
+    /// more than any safe epsilon, which used to flag a phantom discontinuity
+    /// every block: machine-gunned steps + flushed swing/ratchet carries).
+    last_host_step: f64,
     prev_floor: i64,
     pending: [Trigger; MAX_PENDING],
     pending_len: usize,
@@ -386,7 +426,11 @@ impl Sequencer {
             current: 0,
             queued: None,
             playing: false,
+            fill_held: false,
+            epoch_fl: 0,
+            early_fired: [i64::MIN; MAX_TRACKS],
             playhead_steps: 0.0,
+            last_host_step: f64::NEG_INFINITY,
             prev_floor: -1,
             pending: [empty; MAX_PENDING],
             pending_len: 0,
@@ -404,7 +448,7 @@ impl Sequencer {
     }
 
     pub fn set_fill(&mut self, on: bool) {
-        self.pattern.fill_active = on;
+        self.fill_held = on;
     }
 
     /// Current step index under the playhead (for the GUI moving column), or
@@ -415,7 +459,9 @@ impl Sequencer {
             return None;
         }
         let len = self.pattern.length.max(1) as i64;
-        Some(self.prev_floor.rem_euclid(len) as usize)
+        // Epoch-relative, matching eval_track — so the GUI playhead column is
+        // aligned after switching into a different-length pattern.
+        Some((self.prev_floor - self.epoch_fl).rem_euclid(len) as usize)
     }
 
     pub fn toggle_step(&mut self, track: usize, step: usize) -> bool {
@@ -572,8 +618,11 @@ impl Sequencer {
 
     pub fn reset_playhead(&mut self) {
         self.playhead_steps = 0.0;
+        self.last_host_step = f64::NEG_INFINITY;
         self.prev_floor = -1;
         self.carry_len = 0;
+        self.epoch_fl = 0;
+        self.early_fired = [i64::MIN; MAX_TRACKS];
     }
 
     /// Snapshot the live bank into `state` for persistence. Allocation-free when
@@ -587,6 +636,13 @@ impl Sequencer {
         // the edited slot lives in `self.pattern`, not yet flushed to the bank.
         state.patterns[self.current] = self.pattern;
         state.current = self.current as u8;
+        // FILL is live performance state (`fill_held`), never pattern data:
+        // scrub the legacy per-pattern flag so a project saved mid-fill (or one
+        // poisoned by the old bug) can't reload with fill stuck on. (Bool writes
+        // only — alloc-free.)
+        for p in state.patterns.iter_mut() {
+            p.fill_active = false;
+        }
     }
 
     /// Adopt a persisted bank (host project load) and rewind to the top.
@@ -614,14 +670,25 @@ impl Sequencer {
 
         let steps_per_qn = self.pattern.resolution.max(1) as f64 / 4.0;
         let host_step = pos_qn * steps_per_qn;
-        let discontinuity = host_step + 1.0e-6 < self.playhead_steps
+        // Backward relocate: compare the host's OWN successive positions (they
+        // are monotone through any-speed tempo automation; only a genuine
+        // loop-wrap / relocate moves them backward). Comparing against the
+        // block-start-tempo extrapolation flagged a phantom discontinuity every
+        // block of a ritardando. Forward jumps still trip on the 0.5-step gap
+        // vs. the extrapolated playhead.
+        let discontinuity = host_step + 1.0e-3 < self.last_host_step
             || (host_step - self.playhead_steps).abs() > 0.5;
+        self.last_host_step = host_step;
         self.playhead_steps = host_step;
         if discontinuity {
             self.prev_floor = host_step.floor() as i64 - 1;
             // A transport relocate / loop-wrap invalidates sub-hits carried from
-            // the old position — flush them so they can't ghost at the new spot.
+            // the old position — flush them (and any early-fire markers) so they
+            // can't ghost at the new spot, and re-anchor the pattern epoch to
+            // the host-absolute grid.
             self.carry_len = 0;
+            self.epoch_fl = 0;
+            self.early_fired = [i64::MIN; MAX_TRACKS];
         }
 
         // Fire carried sub-hits due this block; carry the rest forward.
@@ -660,15 +727,25 @@ impl Sequencer {
         samples_per_step: f64,
         samples_per_micro_tick: f64,
     ) {
-        // At a loop boundary, switch in any queued pattern (song chaining).
+        // At a loop boundary (relative to the CURRENT pattern's epoch), switch
+        // in any queued pattern (song chaining) and stamp the new epoch so the
+        // incoming pattern starts at ITS step 0, loop 0 — `First` fires on
+        // entry, and a different-length pattern doesn't come in mid-bar.
         let plen0 = self.pattern.length.max(1) as i64;
-        if fl.rem_euclid(plen0) == 0 {
+        if (fl - self.epoch_fl).rem_euclid(plen0) == 0 {
             if let Some(q) = self.queued.take() {
                 self.bank[self.current] = self.pattern;
                 self.current = q.min(N_PATTERNS - 1);
                 self.pattern = self.bank[self.current];
+                self.epoch_fl = fl;
+                // Any early-fire marker belongs to the OUTGOING pattern; the
+                // incoming pattern's steps must all evaluate fresh.
+                self.early_fired = [i64::MIN; MAX_TRACKS];
             }
         }
+        // Everything below is epoch-relative (identical to absolute while no
+        // switch has happened: epoch 0 -> rel == fl, bit-exact).
+        let rel = fl - self.epoch_fl;
         let plen = self.pattern.length.max(1) as i64;
         // Conditions evaluate against the pattern-loop epoch (the song loop),
         // even for polymeter tracks that wrap on their own length. The GROOVE
@@ -676,9 +753,22 @@ impl Sequencer {
         // function of (seed, track, step) — see eval_track — so it is frozen and
         // identical every loop by construction, and editing one step never
         // re-rolls another.
-        let loop_u = fl.div_euclid(plen).max(0) as u64;
+        let loop_u = rel.div_euclid(plen).max(0) as u64;
         for t in 0..MAX_TRACKS {
-            self.eval_track(t, fl, loop_u, i, block_len, samples_per_step, samples_per_micro_tick);
+            self.eval_track(t, rel, loop_u, i, block_len, samples_per_step, samples_per_micro_tick, false);
+        }
+        // Lookahead: a step whose NET timing offset is negative (micro pulled
+        // ahead of the beat / the rushed half of humanize) belongs BEFORE its
+        // own boundary — peek one step ahead and fire it inside this step's
+        // span. Steps with off >= 0 are untouched (the peek is a pure read), so
+        // the default path is bit-exact. Skipped when the next boundary would
+        // commit a queued switch (we'd be peeking the wrong pattern).
+        let next_rel = rel + 1;
+        if !(self.queued.is_some() && next_rel.rem_euclid(plen) == 0) {
+            let next_loop_u = next_rel.div_euclid(plen).max(0) as u64;
+            for t in 0..MAX_TRACKS {
+                self.eval_track(t, next_rel, next_loop_u, i, block_len, samples_per_step, samples_per_micro_tick, true);
+            }
         }
     }
 
@@ -686,25 +776,38 @@ impl Sequencer {
     fn eval_track(
         &mut self,
         t: usize,
-        fl: i64,
+        rel: i64, // step position relative to the current pattern's epoch
         loop_u: u64,
         i: usize,
         block_len: usize,
         samples_per_step: f64,
         samples_per_micro_tick: f64,
+        // Lookahead pass for the NEXT boundary: schedules ONLY steps whose net
+        // offset is negative (they sound before their own boundary); everything
+        // else returns untouched. The normal pass (false) consumes the marker.
+        peek_early: bool,
     ) {
+        if !peek_early {
+            // This step already sounded via the lookahead — don't fire it twice.
+            let abs = rel + self.epoch_fl;
+            if self.early_fired[t] == abs {
+                self.early_fired[t] = i64::MIN;
+                return;
+            }
+        }
         let track = self.pattern.tracks[t];
         if track.muted {
             return;
         }
         let slen = (track.length.max(1) as i64).min(MAX_STEPS as i64);
-        let step_idx = fl.rem_euclid(slen) as usize;
+        let step_idx = rel.rem_euclid(slen) as usize;
         let step = track.steps[step_idx];
         if !step.on {
             return;
         }
-        // 1. condition gate
-        if !step.condition.passes(loop_u, self.pattern.fill_active) {
+        // 1. condition gate (fill_held is sequencer-level performance state,
+        // so a held FILL survives pattern switches)
+        if !step.condition.passes(loop_u, self.fill_held) {
             return;
         }
         // 2. probability — each cell rolls from its OWN seed (a pure function of
@@ -730,9 +833,10 @@ impl Sequencer {
         };
         // swing P (50..75): the off-16th of each pair is delayed by (P-50)/50 of
         // a step (0 at 50, half a step at 75 = max). Swing/groove follow the
-        // ABSOLUTE grid position, not the per-track (polymeter) step, so a swung
-        // groove doesn't "walk" on odd-length lanes.
-        let grid_pos = fl.rem_euclid(self.pattern.length.max(1) as i64) as usize;
+        // PATTERN grid position (epoch-relative), not the per-track (polymeter)
+        // step, so a swung groove doesn't "walk" on odd-length lanes — and a
+        // pattern switched in at an odd absolute step keeps its swing parity.
+        let grid_pos = rel.rem_euclid(self.pattern.length.max(1) as i64) as usize;
         let swing_frac = (swing - 50.0).max(0.0) / 50.0;
         let swing_off = if grid_pos % 2 == 1 { swing_frac } else { 0.0 };
         let groove_off =
@@ -743,7 +847,21 @@ impl Sequencer {
             let mut rt = XorShift32::new(mix_seed(self.pattern.seed, t as u32, step_idx as u32, 2));
             off += (rt.next_bipolar() * h * 0.04) as f64 * samples_per_step;
         }
-        let base_off = off.max(0.0); // M5 part 1 clamps early nudges to the boundary
+        // Anchor + offset-from-own-boundary. Normal pass: anchored at THIS
+        // boundary, negative offsets clamped (the lookahead already fired them a
+        // step ago). Peek pass: only a NET-negative step fires here, anchored a
+        // full step ahead so it sounds |off| before its own boundary; the marker
+        // makes its own pass a no-op. Deterministic either way: all randoms are
+        // pure per-cell functions, so both passes compute identical values.
+        let (anchor, base_off) = if peek_early {
+            if off >= 0.0 {
+                return; // on-time or late: its own boundary pass handles it
+            }
+            self.early_fired[t] = rel + self.epoch_fl;
+            (i as f64 + samples_per_step, off)
+        } else {
+            (i as f64, off.max(0.0))
+        };
 
         // 5. per-hit analog-drift randoms — own per-cell seeds (purposes 3/4), pure
         //    normalized bipolar values; the kit scales them by the voice's DRIFT
@@ -771,13 +889,16 @@ impl Sequencer {
         //    (swung) start and the next step boundary, so a roll can't spill past it.
         let ratchet = step.ratchet.clamp(1, 8);
         if ratchet <= 1 {
-            self.schedule(i as f64 + base_off, block_len, t, vel, mods, &step);
+            self.schedule(anchor + base_off, block_len, t, vel, mods, &step);
         } else {
+            // span = room from the (possibly early) start to the step's END
+            // boundary; base_off is relative to the step's OWN boundary in both
+            // passes, so the formula holds (an early roll just gets extra room).
             let span = (samples_per_step - base_off).max(samples_per_step * 0.25);
             let spacing = span / ratchet as f64;
             for k in 0..ratchet {
                 let kv = ratchet_velocity(vel, k, ratchet, step.ratchet_ramp);
-                self.schedule(i as f64 + base_off + k as f64 * spacing, block_len, t, kv, mods, &step);
+                self.schedule(anchor + base_off + k as f64 * spacing, block_len, t, kv, mods, &step);
             }
         }
     }
@@ -852,6 +973,22 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_plock_count_is_healed_not_panicked() {
+        // A deserialized plock_count > MAX_PLOCKS (corrupt chunk / hand-edited
+        // preset) must not panic the audio-thread edit paths.
+        let mut s = Step::default();
+        s.plock_count = 200;
+        s.set_plock(3, 0.5); // would index plocks[4] and panic before the heal
+        assert!(s.plock_count as usize <= MAX_PLOCKS, "count healed");
+        s.set_plock(0, 0.7); // replace path over the healed range must work
+        assert!((s.plocks()[0].value - 0.7).abs() < 1e-6);
+        let mut s = Step::default();
+        s.plock_count = 200;
+        s.clear_plock(0); // clears the (default-param-0) healed entries, no panic
+        assert!(s.plock_count as usize <= MAX_PLOCKS);
+    }
 
     #[test]
     fn dense_ratchets_dont_overflow_large_blocks() {
@@ -1204,6 +1341,110 @@ mod tests {
         assert_eq!(seq.queued_pattern(), Some(2));
         seq.process_block(2.0, 120.0, sr, bar); // crosses the loop boundary
         assert_eq!(seq.current_pattern(), 2, "switched at the loop boundary");
+    }
+
+    #[test]
+    fn held_fill_survives_pattern_switch_and_never_persists() {
+        // FILL is performance state: holding it through a queued switch must
+        // keep Fill-conditioned steps firing on the NEW pattern, and a save
+        // must never carry a stuck fill flag.
+        let mut seq = Sequencer::new();
+        // Pattern 2: one Fill-conditioned step on track 10 (silent in the demo
+        // groove, so any track-10 trigger below is unambiguously this step).
+        seq.select_pattern(2);
+        seq.set_step_params(10, 0, true, 100, false, 100, 1, 0, TrigCondition::Fill);
+        seq.select_pattern(0);
+        seq.set_playing(true);
+        seq.set_fill(true); // held before the switch...
+
+        let sr = 48_000.0;
+        let bar = (4.0 * 0.5 * sr) as usize;
+        seq.process_block(0.0, 120.0, sr, bar / 2);
+        seq.select_pattern(2); // ...queued mid-loop
+        seq.process_block(2.0, 120.0, sr, bar); // crosses the boundary -> switches
+        assert_eq!(seq.current_pattern(), 2);
+        // The new pattern's Fill step (step 0 of its first pass) must have fired.
+        let fired = seq.pending().iter().any(|t| t.track == 10);
+        assert!(fired, "held FILL must carry into the switched-in pattern");
+
+        // Export while fill is held: no pattern may persist fill_active=true.
+        let mut state = SeqState { patterns: vec![Pattern::default(); N_PATTERNS], current: 0 };
+        seq.export_into(&mut state);
+        assert!(
+            state.patterns.iter().all(|p| !p.fill_active),
+            "fill must never persist into a save"
+        );
+    }
+
+    #[test]
+    fn queued_pattern_enters_at_its_own_step_zero_loop_zero() {
+        // Regression: loop/step indices were computed from the ABSOLUTE host
+        // step, so a pattern switched in at fl=16 started with loop_u=1 (its
+        // First-conditioned "play once on entry" steps never fired) and a
+        // different-length pattern entered mid-bar. The epoch stamped at the
+        // switch commit makes the incoming pattern start at step 0, loop 0.
+        let mut seq = Sequencer::new();
+        seq.select_pattern(3);
+        seq.set_step_params(10, 0, true, 100, false, 100, 1, 0, TrigCondition::First);
+        seq.select_pattern(0);
+        seq.set_playing(true);
+
+        let sr = 48_000.0;
+        let bar = (4.0 * 0.5 * sr) as usize;
+        seq.process_block(0.0, 120.0, sr, bar / 2);
+        seq.select_pattern(3); // queued mid-loop
+        seq.process_block(2.0, 120.0, sr, bar); // crosses fl=16 -> switch commits
+        assert_eq!(seq.current_pattern(), 3);
+        let fired = seq.pending().iter().any(|t| t.track == 10);
+        assert!(fired, "a First-conditioned step must fire when the queued pattern enters");
+        // And the GUI playhead is epoch-relative: just after entry it reads the
+        // top of the pattern, not absolute-step-16's residue.
+        assert!(seq.current_step().unwrap() < 8, "playhead re-anchored to the new pattern");
+    }
+
+    #[test]
+    fn negative_micro_pulls_the_hit_ahead_of_the_beat() {
+        // Regression: the offset clamp silently discarded the entire -48..0
+        // Micro range (and the rushed half of humanize) — dragging Micro
+        // negative changed nothing. Now the hit fires |off| BEFORE its
+        // boundary, exactly once.
+        let sr = 48_000.0_f64;
+        let tempo = 120.0_f64;
+        // A micro tick is 1/384 of a quarter = 62.5 samples here; -24 ticks
+        // pulls the hit 1500 samples (a quarter of the 6000-sample step) early.
+        let mut seq = Sequencer::new();
+        seq.select_pattern(1); // an empty slot
+        seq.set_step_params(10, 4, true, 100, false, 100, 1, -24, TrigCondition::Always);
+        seq.set_playing(true);
+
+        // One bar in one block: the step-4 boundary is at sample 24000, so the
+        // pulled-ahead hit lands at 22500.
+        let bar = (4.0 * 0.5 * sr) as usize; // 96000
+        seq.process_block(0.0, tempo, sr, bar);
+        let hits: Vec<u32> =
+            seq.pending().iter().filter(|t| t.track == 10).map(|t| t.offset).collect();
+        assert_eq!(hits.len(), 1, "the step must fire exactly once (no double-fire)");
+        let expected = 24_000_u32 - 1_500;
+        assert!(
+            (hits[0] as i64 - expected as i64).abs() <= 1,
+            "hit must land 24 ticks early: got {}, expected ~{expected}",
+            hits[0]
+        );
+
+        // And across a block boundary: block ends exactly at the step-4 boundary
+        // sample; the early hit belongs to the FIRST block, nothing re-fires in
+        // the second.
+        let mut seq = Sequencer::new();
+        seq.select_pattern(1);
+        seq.set_step_params(10, 4, true, 100, false, 100, 1, -24, TrigCondition::Always);
+        seq.set_playing(true);
+        seq.process_block(0.0, tempo, sr, 24_000); // covers boundaries 0..=3, peeks 4
+        let first: Vec<u32> =
+            seq.pending().iter().filter(|t| t.track == 10).map(|t| t.offset).collect();
+        assert_eq!(first, vec![22_500], "early hit scheduled in the block before its boundary");
+        seq.process_block(1.0, tempo, sr, 24_000); // covers boundary 4 itself
+        let second = seq.pending().iter().filter(|t| t.track == 10).count();
+        assert_eq!(second, 0, "its own boundary pass must consume the early-fire marker");
     }
 
     #[test]
