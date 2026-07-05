@@ -29,6 +29,10 @@ pub struct DahdEnv {
     hold_len: u32,
     hold_count: u32,
     decay_coef: f32,
+    /// The configured (un-choked) decay coefficient. `choke()` overwrites the
+    /// live `decay_coef` for the current tail only; `trigger()`/`reset()` restore
+    /// from here so a choke never leaks into the NEXT hit's decay time.
+    natural_decay_coef: f32,
     /// Below this the decay is snapped to silence and the stage goes Idle.
     floor: f32,
 }
@@ -43,6 +47,7 @@ impl DahdEnv {
             hold_len: 0,
             hold_count: 0,
             decay_coef: 0.999,
+            natural_decay_coef: 0.999,
             floor: 1.0e-4,
         };
         e.set_params(0.5, 0.0, 300.0);
@@ -63,10 +68,14 @@ impl DahdEnv {
         let d = (decay_ms * 0.001 * self.sr).max(1.0);
         // level *= coef each sample; coef^d == 0.001 (-60 dB).
         self.decay_coef = (0.001_f32).powf(1.0 / d);
+        self.natural_decay_coef = self.decay_coef;
     }
 
-    /// Start the envelope from the top of its attack.
+    /// Start the envelope from the top of its attack. Restores the configured
+    /// decay: a prior `choke()` shortens only the tail it interrupted, never
+    /// this hit (an unchoked env writes back identical bits — a no-op).
     pub fn trigger(&mut self) {
+        self.decay_coef = self.natural_decay_coef;
         if self.attack_inc >= 1.0 {
             self.stage = Stage::Hold;
             self.level = 1.0;
@@ -78,10 +87,12 @@ impl DahdEnv {
     }
 
     /// Fast-release override (choke groups): jump to decay with a short time.
+    /// Overwrites only the LIVE coefficient — and only when a tail is actually
+    /// sounding, so an idle voice caught in a choke-group broadcast is untouched.
     pub fn choke(&mut self, release_ms: f32) {
-        let d = (release_ms * 0.001 * self.sr).max(1.0);
-        self.decay_coef = (0.001_f32).powf(1.0 / d);
         if self.stage != Stage::Idle {
+            let d = (release_ms * 0.001 * self.sr).max(1.0);
+            self.decay_coef = (0.001_f32).powf(1.0 / d);
             self.stage = Stage::Decay;
         }
     }
@@ -94,6 +105,7 @@ impl DahdEnv {
         self.stage = Stage::Idle;
         self.level = 0.0;
         self.hold_count = 0;
+        self.decay_coef = self.natural_decay_coef;
     }
 
     pub fn next(&mut self) -> f32 {
@@ -140,6 +152,70 @@ mod tests {
             assert_eq!(e.next(), 0.0);
         }
         assert!(!e.is_active());
+    }
+
+    #[test]
+    fn retrigger_after_choke_restores_natural_decay() {
+        // Regression: choke() used to permanently overwrite the decay coefficient,
+        // so every hit AFTER a choke played with the ~ms choke decay (the open hat
+        // became a tick for the rest of the session). A re-trigger must ring
+        // exactly as long as a never-choked env.
+        fn ring_len(e: &mut DahdEnv) -> usize {
+            e.trigger();
+            let mut n = 0;
+            while e.is_active() {
+                e.next();
+                n += 1;
+                assert!(n < 480_000, "env must reach idle");
+            }
+            n
+        }
+        let mut fresh = DahdEnv::new(48_000.0);
+        fresh.set_params(0.0, 0.0, 380.0);
+        let natural = ring_len(&mut fresh);
+
+        let mut choked = DahdEnv::new(48_000.0);
+        choked.set_params(0.0, 0.0, 380.0);
+        choked.trigger();
+        for _ in 0..500 {
+            choked.next();
+        }
+        choked.choke(6.0);
+        while choked.is_active() {
+            choked.next();
+        }
+        assert_eq!(ring_len(&mut choked), natural, "post-choke hit must ring the full natural decay");
+
+        // reset() must also restore (a panic/transport reset repairs the env).
+        let mut r = DahdEnv::new(48_000.0);
+        r.set_params(0.0, 0.0, 380.0);
+        r.trigger();
+        r.choke(6.0);
+        r.reset();
+        assert_eq!(ring_len(&mut r), natural, "reset must restore the natural decay");
+    }
+
+    #[test]
+    fn idle_choke_is_a_no_op() {
+        // A choke-group broadcast hits idle members too; it must not corrupt them.
+        fn ring_len(e: &mut DahdEnv) -> usize {
+            e.trigger();
+            let mut n = 0;
+            while e.is_active() {
+                e.next();
+                n += 1;
+            }
+            n
+        }
+        let mut fresh = DahdEnv::new(48_000.0);
+        fresh.set_params(0.0, 0.0, 380.0);
+        let natural = ring_len(&mut fresh);
+
+        let mut idle = DahdEnv::new(48_000.0);
+        idle.set_params(0.0, 0.0, 380.0);
+        idle.choke(6.0); // choked while idle — must be a pure no-op
+        assert!(!idle.is_active());
+        assert_eq!(ring_len(&mut idle), natural, "an idle-choked env's first hit must be natural");
     }
 
     #[test]

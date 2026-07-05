@@ -1336,6 +1336,50 @@ mod tests {
     }
 
     #[test]
+    fn choke_does_not_corrupt_the_next_hit() {
+        // Regression: DahdEnv::choke permanently overwrote the decay coefficient,
+        // so after the FIRST closed hat, every open hat rendered as an ~8ms tick
+        // (Neutral puts them in choke group 1; the demo groove hits closed hat
+        // first). A choked voice's NEXT hit must be byte-identical to a fresh one.
+        fn open_hat_render(kit: &mut DrumKit) -> Vec<f32> {
+            kit.voices[6].trigger(1.0, false);
+            let mut out = Vec::new();
+            while kit.voices[6].is_active() {
+                out.push(kit.voices[6].render().0);
+                assert!(out.len() < 480_000, "open hat must reach idle");
+            }
+            out
+        }
+        let mut fresh = DrumKit::neutral(48_000.0);
+        let baseline = open_hat_render(&mut fresh);
+        assert!(baseline.len() > 10_000, "the open hat should ring (got {} samples)", baseline.len());
+
+        // Idle-choke: the closed hat's choke broadcast hits the never-played open hat.
+        let mut k = DrumKit::neutral(48_000.0);
+        k.trigger(5, 1.0, false, &[]);
+        assert_eq!(open_hat_render(&mut k), baseline, "idle-choked open hat must be unharmed");
+
+        // Live choke: open hat rings, closed hat chokes it, next open hat rings
+        // its full natural length. (Ring length, not bytes: the HP filter keeps
+        // its tiny residual memory across hits by design — analog-style — but the
+        // env decay TIME, which the bug corrupted, is deterministic and exact.)
+        let mut k = DrumKit::neutral(48_000.0);
+        k.trigger(6, 1.0, false, &[]);
+        for _ in 0..2_000 {
+            k.voices[6].render();
+        }
+        k.trigger(5, 1.0, false, &[]); // chokes the ringing open hat
+        while k.voices[6].is_active() {
+            k.voices[6].render();
+        }
+        assert_eq!(
+            open_hat_render(&mut k).len(),
+            baseline.len(),
+            "post-choke open hat must ring the full natural decay"
+        );
+    }
+
+    #[test]
     fn nonfinite_drift_cents_stays_finite_per_voice() {
         // A poisoned per-hit pitch offset (NaN/inf cents — the worst a future
         // mod/drift source could feed `set_pitch_drift_cents`) must never make a
