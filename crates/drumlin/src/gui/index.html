@@ -199,7 +199,6 @@
         <div class="rail-btn" data-view="voice">VOICE</div>
         <div class="rail-btn" data-view="mix">MIX</div>
         <div class="rail-btn" data-view="mod">MOD</div>
-        <div class="rail-btn">BUS FX</div>
         <div class="rail-btn" data-view="kits">KITS</div>
       </div>
       <div class="grid-wrap"><div class="grid" id="grid"></div></div>
@@ -280,6 +279,9 @@
   const CONDS = [["Always",0],["Fill",1],["Not Fill",2],["First",3],["Not First",4],["1:2",5,1,2],["1:4",5,1,4],["3:4",5,3,4]];
 
   let LENGTH = 16, swing = 50, human = 0;
+  // Per-pattern feel meta (length/swing/humanize are Pattern fields engine-side;
+  // the header sliders must follow a pattern switch, not show the old slot's).
+  let patMeta = Array.from({ length: 16 }, () => ({ length: 16, swing: 50, humanize: 0 }));
   let bank = [];     // [pattern][track][step] = step obj
   let cur = 0;
   let sel = null;    // {t, s}
@@ -355,7 +357,7 @@
 
   function sendParams(t, s) {
     const o = st(t, s);
-    send({ type: "step-params", track: t, step: s, on: o.on, vel: o.vel, accent: o.accent, prob: o.prob, rat: o.rat, micro: o.micro, cond: o.cond, ra: o.ra, rb: o.rb });
+    send({ type: "step-params", track: t, step: s, on: o.on, vel: o.vel, accent: o.accent, prob: o.prob, rat: o.rat, ramp: o.ramp || 0, micro: o.micro, cond: o.cond, ra: o.ra, rb: o.rb });
   }
 
   function renderInsp() {
@@ -380,6 +382,8 @@
     inspEl.appendChild(mkSlider("Velocity", 0, 127, o.vel, x => x, x => { o.vel = x; paint(t, s); sendParams(t, s); }));
     inspEl.appendChild(mkSlider("Probability", 0, 100, o.prob, x => x + "%", x => { o.prob = x; paint(t, s); sendParams(t, s); }));
     inspEl.appendChild(mkSlider("Ratchet", 1, 8, o.rat, x => "×" + x, x => { o.rat = x; paint(t, s); sendParams(t, s); }));
+    // Ratchet velocity ramp: negative = flam (dying roll), positive = build.
+    inspEl.appendChild(mkSlider("Ramp", -100, 100, o.ramp || 0, x => (x > 0 ? "+" + x : "" + x), x => { o.ramp = x; sendParams(t, s); }));
     inspEl.appendChild(mkSlider("Micro", -48, 48, o.micro, x => x, x => { o.micro = x; sendParams(t, s); }));
     // accent
     const arow = document.createElement("div"); arow.className = "row";
@@ -457,7 +461,13 @@
     }
   }
   function selectPattern(p) {
-    if (p === cur) return;
+    if (p === cur) {
+      // Re-selecting the current pattern is the engine's CANCEL for a queued
+      // switch — send it through and drop any queued outline.
+      send({ type: "select-pattern", idx: p });
+      patEls.forEach(e => e.classList.remove("queued"));
+      return;
+    }
     send({ type: "select-pattern", idx: p });
     // Don't optimistically switch `cur`: the engine echoes the authoritative
     // current pattern in status (immediately when stopped, at the loop boundary
@@ -476,8 +486,11 @@
   seqBtn.addEventListener("click", () => { seqOn = !seqOn; seqBtn.classList.toggle("on", seqOn); send({ type: "seq-enable", on: seqOn }); });
   document.getElementById("undo").addEventListener("click", () => send({ type: "undo" }));
   document.getElementById("redo").addEventListener("click", () => send({ type: "redo" }));
-  // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z = redo.
+  // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z = redo. Not while typing in a text
+  // field (the preset-name input keeps its native text undo).
   document.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t && ((t.tagName === "INPUT" && t.type === "text") || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === "z" || e.key === "Z")) {
       e.preventDefault();
       send({ type: e.shiftKey ? "redo" : "undo" });
@@ -490,9 +503,9 @@
   fillBtn.addEventListener("pointerup", fillUp);
   fillBtn.addEventListener("pointerleave", () => { if (fillHeld) fillUp(); });
   const swingEl = document.getElementById("swing"), swingV = document.getElementById("swingv");
-  swingEl.addEventListener("input", () => { swing = +swingEl.value; swingV.textContent = swing; send({ type: "swing", value: swing }); });
+  swingEl.addEventListener("input", () => { swing = +swingEl.value; swingV.textContent = swing; patMeta[cur].swing = swing; send({ type: "swing", value: swing }); });
   const humanEl = document.getElementById("human"), humanV = document.getElementById("humanv");
-  humanEl.addEventListener("input", () => { human = +humanEl.value; humanV.textContent = human; send({ type: "humanize", value: human }); });
+  humanEl.addEventListener("input", () => { human = +humanEl.value; humanV.textContent = human; patMeta[cur].humanize = human; send({ type: "humanize", value: human }); });
 
   // ---- automatable bus params via the gesture bridge: PUMP (id 1), DRIVE (id 2) ----
   function paramSlider(id, el) {
@@ -831,11 +844,13 @@
     document.getElementById("abA").classList.toggle("on", slot === 0);
     document.getElementById("abB").classList.toggle("on", slot === 1);
   }
+  // Highlight follows the plugin's ab-active confirmation (not the click):
+  // recalling an EMPTY register is refused engine-side and must not relight.
   document.querySelectorAll(".ab-store").forEach(b => b.addEventListener("click", () => {
-    const slot = +b.dataset.slot; send({ type: "ab-store", slot }); setAbActive(slot);
+    const slot = +b.dataset.slot; send({ type: "ab-store", slot });
   }));
   document.querySelectorAll(".ab-tog").forEach(b => b.addEventListener("click", () => {
-    const slot = +b.dataset.slot; send({ type: "ab-recall", slot }); setAbActive(slot);
+    const slot = +b.dataset.slot; send({ type: "ab-recall", slot });
   }));
   document.getElementById("abCopy").addEventListener("click", () => send({ type: "ab-copy" }));
 
@@ -863,7 +878,12 @@
         });
       }
       cur = msg.current || 0;
-      const cp = pats[cur] || { length: 16, swing: 50, humanize: 0 };
+      // Keep every slot's feel meta so a pattern switch can re-apply it.
+      patMeta = Array.from({ length: N_PATTERNS }, (_, i) => {
+        const p = pats[i] || {};
+        return { length: p.length || 16, swing: p.swing ?? 50, humanize: p.humanize ?? 0 };
+      });
+      const cp = patMeta[cur];
       LENGTH = cp.length; swing = cp.swing; human = cp.humanize;
       swingEl.value = swing; swingV.textContent = swing; humanEl.value = human; humanV.textContent = human;
       buildGrid(); renderInsp(); refreshPats();
@@ -883,6 +903,10 @@
       }
       // Seed the sidechain (SC) toggle.
       if ("sidechain" in msg) { scOn = !!msg.sidechain; scBtn.classList.toggle("on", scOn); }
+      // Kit highlight: a recall seed carries the kit id, a preset/A-B seed
+      // carries null (the sound is no longer a factory kit's); a pattern-only
+      // seed (undo/init) omits the key and leaves the highlight alone.
+      if ("kit_id" in msg) { curKitId = msg.kit_id; if (curView === "kits") buildKits(); }
       // Seed the MOD page (matrix slots + LFO/env config + macros).
       if (msg.mod) {
         const m = msg.mod;
@@ -916,12 +940,27 @@
     } else if (msg.type === "presets") {
       // Save/delete refreshed the disk list.
       presetList = msg.presets || []; if (curView === "kits") buildKits();
+    } else if (msg.type === "ab-active") {
+      // The plugin confirms accepted stores/recalls; an empty-register click
+      // is refused engine-side and sends nothing.
+      setAbActive(msg.slot | 0);
     } else if (msg.type === "status") {
       setPlayhead(msg.playhead); setVoices(msg.voices);
       playing = msg.playing; playBtn.classList.toggle("held", playing); playBtn.textContent = playing ? "■" : "▶";
       if ("seq" in msg) { seqOn = msg.seq; seqBtn.classList.toggle("on", seqOn); }
       if ("pump" in msg) { pumpHist.push(msg.pump); pumpHist.shift(); drawPumpScope(); }
-      if ("pattern" in msg && msg.pattern !== cur) { cur = msg.pattern; patEls.forEach(e => e.classList.remove("queued")); refreshGridFromBank(); }
+      if ("pattern" in msg && msg.pattern !== cur) {
+        cur = msg.pattern;
+        patEls.forEach(e => e.classList.remove("queued"));
+        // Apply the incoming pattern's feel meta BEFORE repainting (paint and
+        // the playhead read LENGTH); rebuild the grid if the length changed.
+        const pm = patMeta[cur] || { length: 16, swing: 50, humanize: 0 };
+        const lenChanged = pm.length !== LENGTH;
+        LENGTH = pm.length; swing = pm.swing; human = pm.humanize;
+        swingEl.value = swing; swingV.textContent = swing;
+        humanEl.value = human; humanV.textContent = human;
+        if (lenChanged) { buildGrid(); renderInsp(); refreshPats(); } else { refreshGridFromBank(); }
+      }
     }
   };
 

@@ -504,6 +504,7 @@ impl Sequencer {
         accent: bool,
         probability: u8,
         ratchet: u8,
+        ramp: i8,
         micro: i16,
         condition: TrigCondition,
     ) {
@@ -516,6 +517,7 @@ impl Sequencer {
         s.accent = accent;
         s.probability = probability.min(100);
         s.ratchet = ratchet.clamp(1, 8);
+        s.ratchet_ramp = ramp.clamp(-100, 100);
         s.micro = micro;
         s.condition = condition;
     }
@@ -1003,7 +1005,7 @@ mod tests {
             let mut s = Sequencer::new();
             for t in 0..MAX_TRACKS {
                 for step in 0..MAX_STEPS {
-                    s.set_step_params(t, step, true, 110, false, 100, 8, 0, TrigCondition::Always);
+                    s.set_step_params(t, step, true, 110, false, 100, 8, 0, 0, TrigCondition::Always);
                 }
             }
             s.set_playing(true);
@@ -1352,7 +1354,7 @@ mod tests {
         // Pattern 2: one Fill-conditioned step on track 10 (silent in the demo
         // groove, so any track-10 trigger below is unambiguously this step).
         seq.select_pattern(2);
-        seq.set_step_params(10, 0, true, 100, false, 100, 1, 0, TrigCondition::Fill);
+        seq.set_step_params(10, 0, true, 100, false, 100, 1, 0, 0, TrigCondition::Fill);
         seq.select_pattern(0);
         seq.set_playing(true);
         seq.set_fill(true); // held before the switch...
@@ -1385,7 +1387,7 @@ mod tests {
         // switch commit makes the incoming pattern start at step 0, loop 0.
         let mut seq = Sequencer::new();
         seq.select_pattern(3);
-        seq.set_step_params(10, 0, true, 100, false, 100, 1, 0, TrigCondition::First);
+        seq.set_step_params(10, 0, true, 100, false, 100, 1, 0, 0, TrigCondition::First);
         seq.select_pattern(0);
         seq.set_playing(true);
 
@@ -1414,7 +1416,7 @@ mod tests {
         // pulls the hit 1500 samples (a quarter of the 6000-sample step) early.
         let mut seq = Sequencer::new();
         seq.select_pattern(1); // an empty slot
-        seq.set_step_params(10, 4, true, 100, false, 100, 1, -24, TrigCondition::Always);
+        seq.set_step_params(10, 4, true, 100, false, 100, 1, 0, -24, TrigCondition::Always);
         seq.set_playing(true);
 
         // One bar in one block: the step-4 boundary is at sample 24000, so the
@@ -1436,7 +1438,7 @@ mod tests {
         // the second.
         let mut seq = Sequencer::new();
         seq.select_pattern(1);
-        seq.set_step_params(10, 4, true, 100, false, 100, 1, -24, TrigCondition::Always);
+        seq.set_step_params(10, 4, true, 100, false, 100, 1, 0, -24, TrigCondition::Always);
         seq.set_playing(true);
         seq.process_block(0.0, tempo, sr, 24_000); // covers boundaries 0..=3, peeks 4
         let first: Vec<u32> =

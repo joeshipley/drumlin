@@ -46,7 +46,7 @@ const UNDO_CAP: usize = 64;
 #[derive(Clone, Copy)]
 enum SeqEdit {
     SetStep { track: u8, step: u8, on: bool },
-    StepParams { track: u8, step: u8, on: bool, vel: u8, accent: bool, prob: u8, rat: u8, micro: i16, cond: u8, ra: u8, rb: u8 },
+    StepParams { track: u8, step: u8, on: bool, vel: u8, accent: bool, prob: u8, rat: u8, ramp: i8, micro: i16, cond: u8, ra: u8, rb: u8 },
     SetPlock { track: u8, step: u8, param: u16, value: f32 },
     ClearPlock { track: u8, step: u8, param: u16 },
     ClearLane { track: u8 },
@@ -79,7 +79,8 @@ enum Action {
     Init,
     Note { on: bool, note: u8 },
     Step { track: u8, step: u8, on: bool },
-    StepParams { track: u8, step: u8, on: bool, vel: u8, accent: bool, prob: u8, rat: u8, micro: i16, cond: u8, ra: u8, rb: u8 },
+    // `ramp` is serde-defaulted so JSON from a stale/cached GUI still parses.
+    StepParams { track: u8, step: u8, on: bool, vel: u8, accent: bool, prob: u8, rat: u8, #[serde(default)] ramp: i8, micro: i16, cond: u8, ra: u8, rb: u8 },
     SetPlock { track: u8, step: u8, param: u16, value: f32 },
     ClearPlock { track: u8, step: u8, param: u16 },
     ClearLane { track: u8 },
@@ -913,7 +914,10 @@ impl Plugin for Drumlin {
                     // (see restore_from!): any thread that sees the staged state
                     // also sees the flag, so the audio export can't clobber it.
                     let msg = params.state.lock().ok().map(|mut s| {
-                        let m = apply_sound(&mut s, &snap, &plist);
+                        let mut m = apply_sound(&mut s, &snap, &plist);
+                        // The sound is no longer a factory kit's — clear the KITS
+                        // page highlight (a pattern-only undo seed omits the key).
+                        m["kit_id"] = json!(null);
                         recall_pending.store(true, Ordering::Relaxed);
                         m
                     });
@@ -1023,8 +1027,8 @@ impl Plugin for Drumlin {
                         }
                     }
                     Action::Step { track, step, on } => push_edit!(SeqEdit::SetStep { track, step, on }),
-                    Action::StepParams { track, step, on, vel, accent, prob, rat, micro, cond, ra, rb } => {
-                        push_edit!(SeqEdit::StepParams { track, step, on, vel, accent, prob, rat, micro, cond, ra, rb })
+                    Action::StepParams { track, step, on, vel, accent, prob, rat, ramp, micro, cond, ra, rb } => {
+                        push_edit!(SeqEdit::StepParams { track, step, on, vel, accent, prob, rat, ramp, micro, cond, ra, rb })
                     }
                     Action::SetPlock { track, step, param, value } => {
                         push_edit!(SeqEdit::SetPlock { track, step, param, value })
@@ -1131,6 +1135,9 @@ impl Plugin for Drumlin {
                                     &driven, sc, &plist,
                                 );
                                 m["macro_cc"] = json!(macro_cc_map(&cc_to_macro));
+                                // Tag the seed with the recalled kit so the KITS
+                                // page highlight tracks what the machine holds.
+                                m["kit_id"] = json!(kit.id);
                                 recall_pending.store(true, Ordering::Relaxed);
                                 (driven, sc, m)
                             });
@@ -1486,7 +1493,7 @@ impl Plugin for Drumlin {
                 SeqEdit::SetStep { track, step, on } => {
                     self.seq.set_step(track as usize, step as usize, on)
                 }
-                SeqEdit::StepParams { track, step, on, vel, accent, prob, rat, micro, cond, ra, rb } => {
+                SeqEdit::StepParams { track, step, on, vel, accent, prob, rat, ramp, micro, cond, ra, rb } => {
                     self.seq.set_step_params(
                         track as usize,
                         step as usize,
@@ -1495,6 +1502,7 @@ impl Plugin for Drumlin {
                         accent,
                         prob,
                         rat,
+                        ramp,
                         micro,
                         TrigCondition::from_code(cond, ra, rb),
                     )

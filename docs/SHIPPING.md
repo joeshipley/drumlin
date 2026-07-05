@@ -74,7 +74,13 @@ What the suite proves:
 Then the AU validation gate + the manual RT sign-off:
 
 ```sh
-# Builds the bundles and runs `auval -v aumu Drml JShp` — must end "AU VALIDATION SUCCEEDED."
+# Builds the bundles and auval-validates — must end "AU VALIDATION SUCCEEDED."
+# NOTE: clap-wrapper derives the AU subtype from the CLAP id when embedding a
+# prebuilt .clap (AU_SUBTYPE_CODE is informational there); the script reads the
+# REAL subtype back from the installed Info.plist and validates against that.
+# To re-run by hand: `auval -v aumu KV6m JShp` — or ask the bundle itself:
+#   plutil -extract 'AudioComponents.0.subtype' raw -o - \
+#     ~/Library/Audio/Plug-Ins/Components/Drumlin.component/Contents/Info.plist
 bash scripts/build-au.sh
 
 # Manual RT sign-off (needs a live audio device + display — not CI-able):
