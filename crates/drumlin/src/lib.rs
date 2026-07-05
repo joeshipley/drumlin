@@ -387,6 +387,11 @@ pub struct Drumlin {
     /// Last SEQ-enable value mirrored into the persisted state, so a toggle (no
     /// step edit) still re-snapshots.
     persisted_seq_enabled: bool,
+    /// Set when a MIDI-learned CC moves a macro; the export block mirrors
+    /// `self.macros` into the persisted state (same retry discipline as
+    /// `seq_dirty`) — otherwise a CC performance is lost on save, and any
+    /// recall adopt (even a pattern undo) yanks the macros back to stale values.
+    macros_dirty: bool,
 
     /// Preallocated per-sample aux stem accumulator (one stereo pair per aux
     /// output bus), filled by `kit.render_into` — keeps `process` alloc-free.
@@ -424,6 +429,7 @@ impl Default for Drumlin {
             learn_arm: Arc::new(AtomicI8::new(-1)),
             seq_dirty: false,
             persisted_seq_enabled: true,
+            macros_dirty: false,
             aux_scratch: [(0.0, 0.0); N_AUX],
         }
     }
@@ -703,18 +709,25 @@ fn full_json(
     msg
 }
 
-/// True for grid edits that change the current pattern's content (snapshotted for
+/// True for actions that change the current pattern's content (snapshotted for
 /// undo). Selection / transport / sound / continuous-feel edits are excluded.
+/// A GROOVE WORLD recall counts — it memcpys the world's groove over the current
+/// slot, which must be undoable like any other one-click grid mutation (a
+/// pattern-less KIT recall doesn't, so it won't clear the redo branch).
 fn action_mutates_pattern(a: &Action) -> bool {
-    matches!(
-        a,
+    match a {
         Action::Step { .. }
-            | Action::StepParams { .. }
-            | Action::SetPlock { .. }
-            | Action::ClearPlock { .. }
-            | Action::ClearLane { .. }
-            | Action::Euclid { .. }
-    )
+        | Action::StepParams { .. }
+        | Action::SetPlock { .. }
+        | Action::ClearPlock { .. }
+        | Action::ClearLane { .. }
+        | Action::Euclid { .. } => true,
+        Action::RecallKit { id } => kits::FACTORY_KITS
+            .iter()
+            .find(|k| k.id == id.as_str())
+            .is_some_and(|k| k.pattern.is_some()),
+        _ => false,
+    }
 }
 
 /// Derive the per-macro bound CC (`-1` = unbound) from the lock-free lookup, for
@@ -832,8 +845,10 @@ impl Plugin for Drumlin {
         let ab = Arc::new(Mutex::new(AbState::default()));
         // Undo/redo of grid edits: editor-local stacks of whole-pattern snapshots
         // (Pattern is Copy). Restore reuses the recall path. Bounded to UNDO_CAP.
-        let undo_stack: Arc<Mutex<Vec<Pattern>>> = Arc::new(Mutex::new(Vec::new()));
-        let redo_stack: Arc<Mutex<Vec<Pattern>>> = Arc::new(Mutex::new(Vec::new()));
+        // Snapshots are (slot, Pattern): undo restores into the slot the edit
+        // happened in (and re-selects it), never blindly into whatever is current.
+        let undo_stack: Arc<Mutex<Vec<(usize, Pattern)>>> = Arc::new(Mutex::new(Vec::new()));
+        let redo_stack: Arc<Mutex<Vec<(usize, Pattern)>>> = Arc::new(Mutex::new(Vec::new()));
         let cc_to_macro = self.cc_to_macro.clone();
         let learn_arm = self.learn_arm.clone();
         // Last macro->CC map sent to the GUI (suppress unchanged sends).
@@ -841,6 +856,11 @@ impl Plugin for Drumlin {
         // Set when the MIDI-learn map changes; the persist is retried each tick
         // until try_lock succeeds (so a bind isn't lost on lock contention).
         let midi_persist_pending = Arc::new(AtomicBool::new(false));
+        // Macro whose Clear must be re-verified (-1 = none): the audio thread's
+        // arm-load + bind-store are two separate ops, so a CC in flight during a
+        // Clear can land AFTER the scan. Each tick re-clears if a late bind
+        // resurfaced; at most one can occur per arming, so one repeat converges.
+        let cleared_watch = Arc::new(AtomicI8::new(-1));
         // Pack (seq<<21 | playing<<20 | voices<<8 | playhead+1) to suppress
         // unchanged status sends.
         let last_status = Arc::new(AtomicU32::new(u32::MAX));
@@ -889,7 +909,14 @@ impl Plugin for Drumlin {
                 ($snap:expr) => {{
                     let snap = $snap;
                     let plist = presets::list();
-                    let msg = params.state.lock().ok().map(|mut s| apply_sound(&mut s, &snap, &plist));
+                    // The pending flag is set inside the staging critical section
+                    // (see restore_from!): any thread that sees the staged state
+                    // also sees the flag, so the audio export can't clobber it.
+                    let msg = params.state.lock().ok().map(|mut s| {
+                        let m = apply_sound(&mut s, &snap, &plist);
+                        recall_pending.store(true, Ordering::Relaxed);
+                        m
+                    });
                     if let Some(msg) = msg {
                         for bid in 1u8..=9 {
                             let p = pget!(bid);
@@ -900,41 +927,43 @@ impl Plugin for Drumlin {
                         setter.begin_set_parameter(&params.sidechain_key);
                         setter.set_parameter(&params.sidechain_key, snap.sidechain);
                         setter.end_set_parameter(&params.sidechain_key);
-                        recall_pending.store(true, Ordering::Relaxed);
                         ctx.send_json(msg);
                     }
                 }};
             }
-            // Undo/redo: pop a pattern snapshot from $src, push the current onto
-            // $dst, restore it into the selected slot, and re-seed via the recall
-            // path. Reuses the GUI re-seed + recall drain (the playhead resets).
+            // Undo/redo: pop a (slot, pattern) snapshot from $src, push that
+            // slot's displaced content onto $dst, restore into the SNAPSHOT'S
+            // slot (re-selecting it, so the undo is visible), and re-seed via
+            // the recall path. The pending flag is set INSIDE the critical
+            // section so the audio thread's export can't interleave between
+            // staging and signaling and clobber the staged bank.
             macro_rules! restore_from {
                 ($src:expr, $dst:expr) => {{
                     let restored = $src.lock().ok().and_then(|mut s| s.pop());
-                    if let Some(p) = restored {
+                    if let Some((snap_slot, p)) = restored {
                         let msg = if let Ok(mut s) = params.state.lock() {
-                            let cur = s.seq.current as usize;
-                            if let Some(slot) = s.seq.patterns.get_mut(cur) {
-                                let current = *slot;
+                            if let Some(slot) = s.seq.patterns.get_mut(snap_slot) {
+                                let displaced = *slot;
                                 if let Ok(mut d) = $dst.lock() {
-                                    d.push(current);
+                                    d.push((snap_slot, displaced));
                                     if d.len() > UNDO_CAP {
                                         d.remove(0);
                                     }
                                 }
                                 *slot = p;
+                                s.seq.current = snap_slot as u8;
                             }
                             let mut m = full_json(
                                 &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
                                 &bus_values(&params), params.sidechain_key.value(), &presets::list(),
                             );
                             m["macro_cc"] = json!(macro_cc_map(&cc_to_macro));
+                            recall_pending.store(true, Ordering::Relaxed);
                             Some(m)
                         } else {
                             None
                         };
                         if let Some(msg) = msg {
-                            recall_pending.store(true, Ordering::Relaxed);
                             ctx.send_json(msg);
                         }
                     }
@@ -947,13 +976,19 @@ impl Plugin for Drumlin {
                 // Before a grid edit, snapshot the current pattern for undo (and
                 // drop the redo branch). At human edit speed the persisted pattern
                 // already reflects the previous edit, so the snapshot is accurate.
+                // Identical-to-top snapshots are skipped: the persisted pattern
+                // lags the audio thread by ~a block, so a rapid edit burst would
+                // otherwise push duplicate stale snapshots (dead Undo presses).
                 if action_mutates_pattern(&action) {
                     if let Ok(s) = params.state.lock() {
-                        if let Some(p) = s.seq.patterns.get(s.seq.current as usize).copied() {
+                        let cur = s.seq.current as usize;
+                        if let Some(p) = s.seq.patterns.get(cur).copied() {
                             if let Ok(mut u) = undo_stack.lock() {
-                                u.push(p);
-                                if u.len() > UNDO_CAP {
-                                    u.remove(0);
+                                if u.last().is_none_or(|(ls, lp)| *ls != cur || *lp != p) {
+                                    u.push((cur, p));
+                                    if u.len() > UNDO_CAP {
+                                        u.remove(0);
+                                    }
                                 }
                             }
                             if let Ok(mut r) = redo_stack.lock() {
@@ -1074,31 +1109,45 @@ impl Plugin for Drumlin {
                     }
                     Action::RecallKit { id } => {
                         if let Some(kit) = kits::FACTORY_KITS.iter().find(|k| k.id == id.as_str()) {
-                            // Stage the percussion_core half under the lock, then
-                            // release BEFORE driving params / signaling (so the
-                            // audio thread's try_lock isn't contended and the flag
-                            // is set only once staging is complete).
-                            let staged = params.state.lock().ok().map(|mut s| stage_kit(&mut s, kit));
-                            if let Some(staged) = staged {
+                            // Stage the percussion_core half AND build the full GUI
+                            // re-seed under one lock (a recall replaces the grid,
+                            // voice/mix/mod pages, and bus sliders — sending only
+                            // macro labels left the GUI showing the pre-recall
+                            // machine). The pending flag is set inside the critical
+                            // section so the audio export can't clobber the staged
+                            // bank. Bus values in the message are the DRIVEN ones —
+                            // params lag the gestures below.
+                            let plist = presets::list();
+                            let staged = params.state.lock().ok().map(|mut s| {
+                                let staged = stage_kit(&mut s, kit);
+                                let mut driven = [0.0_f32; 9];
+                                for bid in 1u8..=9 {
+                                    driven[(bid - 1) as usize] = staged.bus[bid as usize]
+                                        .unwrap_or_else(|| pget!(bid).default_normalized_value());
+                                }
+                                let sc = staged.sidechain.unwrap_or(false);
+                                let mut m = full_json(
+                                    &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
+                                    &driven, sc, &plist,
+                                );
+                                m["macro_cc"] = json!(macro_cc_map(&cc_to_macro));
+                                recall_pending.store(true, Ordering::Relaxed);
+                                (driven, sc, m)
+                            });
+                            if let Some((driven, sc, msg)) = staged {
                                 // The bus FX chain is part of the lens: drive ids
                                 // 1..9 to the kit's value or their default (master
                                 // gain, id 0, is left alone). Host-recordable.
                                 for bid in 1u8..=9 {
                                     let p = pget!(bid);
-                                    let v = staged.bus[bid as usize].unwrap_or_else(|| p.default_normalized_value());
                                     setter.begin_set_parameter(p);
-                                    setter.set_parameter_normalized(p, v);
+                                    setter.set_parameter_normalized(p, driven[(bid - 1) as usize]);
                                     setter.end_set_parameter(p);
                                 }
-                                let sc = staged.sidechain.unwrap_or(false);
                                 setter.begin_set_parameter(&params.sidechain_key);
                                 setter.set_parameter(&params.sidechain_key, sc);
                                 setter.end_set_parameter(&params.sidechain_key);
-                                // Tell the audio thread to adopt the staged state +
-                                // cut tails at block start.
-                                recall_pending.store(true, Ordering::Relaxed);
-                                // Relabel the MOD-page macro knobs for this world.
-                                ctx.send_json(json!({ "type": "macro-labels", "labels": kit.macro_labels }));
+                                ctx.send_json(msg);
                             }
                         }
                     }
@@ -1149,37 +1198,56 @@ impl Plugin for Drumlin {
                                 }
                                 ab.active = slot;
                             }
+                            ctx.send_json(json!({ "type": "ab-active", "slot": slot }));
                         }
                     }
                     Action::AbRecall { slot } => {
-                        // Apply register A/B if it has been captured.
+                        // Apply register A/B — only if it has been captured. An
+                        // empty register must NOT flip `active` (AB COPY copies
+                        // the ACTIVE register; flipping to an empty one made COPY
+                        // wipe the stored sound with None).
                         let snap = ab.lock().ok().and_then(|mut ab| {
-                            ab.active = slot;
-                            if slot == 0 { ab.a.clone() } else { ab.b.clone() }
+                            let snap = if slot == 0 { ab.a.clone() } else { ab.b.clone() };
+                            if snap.is_some() {
+                                ab.active = slot;
+                            }
+                            snap
                         });
                         if let Some(snap) = snap {
                             apply_snap!(snap);
+                            // Confirm so the GUI highlight follows ACCEPTED
+                            // recalls only (not clicks on an empty register).
+                            ctx.send_json(json!({ "type": "ab-active", "slot": slot }));
                         }
                     }
                     Action::AbCopy => {
-                        // Copy the active register into the other (A<->B).
+                        // Copy the active register into the other (A<->B); a
+                        // never-stored active register is a no-op, not a wipe.
                         if let Ok(mut ab) = ab.lock() {
-                            if ab.active == 0 {
-                                ab.b = ab.a.clone();
-                            } else {
-                                ab.a = ab.b.clone();
+                            let src = if ab.active == 0 { ab.a.clone() } else { ab.b.clone() };
+                            if let Some(src) = src {
+                                if ab.active == 0 {
+                                    ab.b = Some(src);
+                                } else {
+                                    ab.a = Some(src);
+                                }
                             }
                         }
                     }
                     Action::MidiLearn { macro_idx } => {
                         if macro_idx < 8 {
+                            // Re-arming ends any Clear re-verification for it.
+                            if cleared_watch.load(Ordering::Relaxed) == macro_idx as i8 {
+                                cleared_watch.store(-1, Ordering::Relaxed);
+                            }
                             learn_arm.store(macro_idx as i8, Ordering::Relaxed);
                         }
                     }
                     Action::MidiClear { macro_idx } => {
                         // Disarm BEFORE scanning: once the audio thread can't bind a
                         // new CC to this macro, the scan is guaranteed to clear any
-                        // slot (closes the clear-vs-bind race).
+                        // slot. A CC already past the arm-load can still land after
+                        // the scan, so the per-tick watch re-clears a late bind.
                         if learn_arm.load(Ordering::Relaxed) == macro_idx as i8 {
                             learn_arm.store(-1, Ordering::Relaxed);
                         }
@@ -1188,6 +1256,7 @@ impl Plugin for Drumlin {
                                 slot.store(-1, Ordering::Relaxed);
                             }
                         }
+                        cleared_watch.store(macro_idx as i8, Ordering::Relaxed);
                     }
                     Action::Undo => restore_from!(undo_stack, redo_stack),
                     Action::Redo => restore_from!(redo_stack, undo_stack),
@@ -1234,6 +1303,18 @@ impl Plugin for Drumlin {
                 }));
             }
 
+            // Clear re-verification: if a CC bind raced past a MidiClear scan
+            // (it was in flight when Clear disarmed), re-clear it now. The audio
+            // thread can no longer re-arm this macro, so this converges after
+            // one repeat; the map diff below then re-sends + re-persists.
+            let watch = cleared_watch.load(Ordering::Relaxed);
+            if watch >= 0 {
+                for slot in cc_to_macro.iter() {
+                    if slot.load(Ordering::Relaxed) == watch {
+                        slot.store(-1, Ordering::Relaxed);
+                    }
+                }
+            }
             // MIDI-learn: when the bound map changes (a learn completed on the
             // audio thread, or a clear), push it to the GUI + flag a persist.
             // Diffed each tick so the editor needn't be notified explicitly.
@@ -1448,12 +1529,25 @@ impl Plugin for Drumlin {
         // exports are allocation-free, so this stays real-time safe; if the host
         // is serializing for a save right now, we simply retry next block.
         let seq_on = self.seq_enabled.load(Ordering::Relaxed);
-        if self.seq_dirty || seq_on != self.persisted_seq_enabled {
+        if self.seq_dirty || self.macros_dirty || seq_on != self.persisted_seq_enabled {
             if let Ok(mut state) = self.params.state.try_lock() {
-                self.seq.export_into(&mut state.seq);
-                state.seq_enabled = seq_on;
-                self.seq_dirty = false;
-                self.persisted_seq_enabled = seq_on;
+                // Re-check INSIDE the lock: the editor sets recall_pending within
+                // its staging critical section, so if it's clear here the staged
+                // state (if any) isn't in `state` yet and we can't clobber it; if
+                // it's set, skip — the adopt at next block start wins, and it
+                // clears seq_dirty itself. (A pre-lock check alone would race:
+                // we could read a stale false, then acquire the lock after the
+                // editor finished staging.)
+                if !self.recall_pending.load(Ordering::Relaxed) {
+                    self.seq.export_into(&mut state.seq);
+                    state.seq_enabled = seq_on;
+                    self.seq_dirty = false;
+                    self.persisted_seq_enabled = seq_on;
+                    if self.macros_dirty {
+                        state.mod_state.macros = self.macros;
+                        self.macros_dirty = false;
+                    }
+                }
             }
         }
 
@@ -1570,10 +1664,12 @@ impl Plugin for Drumlin {
                                 self.cc_to_macro[cc].store(arm, Ordering::Relaxed);
                                 self.learn_arm.store(-1, Ordering::Relaxed);
                             }
-                            // Apply a bound CC to its macro (pushed via set_macros).
+                            // Apply a bound CC to its macro (pushed via set_macros)
+                            // and mark it for the persisted-state mirror below.
                             let m = self.cc_to_macro[cc].load(Ordering::Relaxed);
                             if (0..8).contains(&m) {
                                 self.macros[m as usize] = value;
+                                self.macros_dirty = true;
                             }
                         }
                         // CC1 also feeds the dedicated mod-wheel source.
@@ -1807,7 +1903,11 @@ mod tests {
                 if let Some(v) = staged.bus[6] { dk.set_pump_curve(v); }
                 if let Some(v) = staged.bus[7] { dk.set_bus_parallel(v); }
                 if let Some(v) = staged.bus[8] { dk.set_bus_transient(v); }
-                if let Some(v) = staged.bus[9] { dk.set_gate_time(v * 200.0); }
+                // Derive from the param itself so the test can't drift from the
+                // real mapping (norm -> plain 20..400ms -> kit, as process does).
+                if let Some(v) = staged.bus[9] {
+                    dk.set_gate_time(DrumlinParams::default().gate_time.preview_plain(v));
+                }
                 dk.set_bus_tempo(120.0);
 
                 seq.set_playing(true);

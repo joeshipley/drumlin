@@ -195,7 +195,7 @@ impl Step {
 }
 
 /// One drum track's lane. `length` < pattern length gives polymeter (design §4.2).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
     // serde's native array impls stop at 32; BigArray covers [Step; 64].
@@ -220,8 +220,8 @@ impl Default for Track {
 }
 
 /// A pattern binds the tracks plus global feel. `Copy`, so an undo snapshot is
-/// one memcpy (design §4.4).
-#[derive(Clone, Copy, Debug)]
+/// one memcpy (design §4.4). `PartialEq` so the undo stack can skip duplicates.
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Pattern {
     pub tracks: [Track; MAX_TRACKS],
