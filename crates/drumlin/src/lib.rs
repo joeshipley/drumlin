@@ -1362,11 +1362,14 @@ impl Plugin for Drumlin {
         &mut self,
         _audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
-        _context: &mut impl InitContext<Self>,
+        context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.kit.set_sample_rate(buffer_config.sample_rate);
         self.mod_engine.set_sample_rate(buffer_config.sample_rate);
+        // Report the bus's constant latency (the true-peak limiter's look-ahead)
+        // so the host delay-compensates Drumlin against other tracks.
+        context.set_latency_samples(self.kit.latency_samples());
         // Adopt any host-restored project state (the pattern bank, SEQ enable,
         // and the per-voice patch). The bank import is skipped if a step edit is
         // still un-snapshotted (`seq_dirty`), so a mid-session sample-rate
@@ -1613,6 +1616,16 @@ impl Plugin for Drumlin {
         } else {
             self.internal_pos_qn
         };
+
+        // Beat-lock the PUMP: while the clock runs, phase-lock the duck to the
+        // beat grid (it used to free-run from instance start — landing at an
+        // arbitrary offset from the beat, different every bounce). Upstream
+        // corrects only >1% drift, so this per-block call never audibly nudges
+        // a locked pump. (Must follow set_bus_tempo above — the division is
+        // converted through the current tempo.)
+        if host_playing || internal_playing {
+            self.kit.sync_pump_to_beats(pos_qn);
+        }
 
         self.seq.set_playing(run);
         self.effective_playing.store(run, Ordering::Relaxed);

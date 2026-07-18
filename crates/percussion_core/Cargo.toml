@@ -13,7 +13,7 @@ rust-version.workspace = true
 # The shared, dependency-free family DSP core (oscillators, filters, envelopes,
 # drive, reverb, dynamics, mod-matrix, denormal util), shared with Esker. Pinned
 # to a rev so builds are reproducible; bump the rev to pull upstream fixes.
-synth_core = { git = "ssh://git@github.com/joeshipley/synth_core.git", rev = "1bc18075ca21a94e31beb8b3eb2de906d204724f" }
+synth_core = { git = "ssh://git@github.com/joeshipley/synth_core.git", rev = "b9e4ce0e56ef32cf22d8ff9a71feae9f49d5a6eb" }
 
 # Optional: derive serde on the pattern POD types so the plugin can persist the
 # pattern bank. serde_big_array covers the [Step; 64] array (serde's native impls

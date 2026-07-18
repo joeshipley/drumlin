@@ -141,16 +141,24 @@ impl DrumBus {
     }
 
     fn configure(&mut self) {
-        // comp stage: SSL glue (+ pump), NO limiter here.
+        // comp stage: SSL glue (+ pump), NO limiter here — the stage is declared
+        // structurally ABSENT (not merely bypassed): a bypassed limiter keeps a
+        // constant-latency look-ahead ring running (an upstream constant-latency
+        // guarantee for toggleable limiters), which would add dead delay to the
+        // whole bus. The chain's real limiter is the separate `limiter` below.
         self.comp.set_glue(true, -18.0, 2.0, 3.0, 1.0);
         self.comp.set_limiter(false, -0.3, 0.05, LimiterStyle::Transparent);
+        self.comp.set_limiter_stage(false);
         self.comp.set_tempo(self.tempo);
-        // parallel/NY stage: hard squash, no pump, no limiter. Its OUTPUT is
-        // added under the dry bus (scaled by `parallel_amt`), so its makeup is
-        // baked in here and the blend amount is the macro.
+        // parallel/NY stage: hard squash, no pump, no limiter (stage absent —
+        // a latent ring here would delay the branch by the look-ahead and comb
+        // it against the dry it is blended under). Its OUTPUT is added under
+        // the dry bus (scaled by `parallel_amt`), so its makeup is baked in
+        // here and the blend amount is the macro.
         self.parallel.set_glue(true, -30.0, 8.0, 6.0, 1.0);
         self.parallel.set_pump(0.0, PumpSource::IntKick, 0.5, 0.5, 0.0);
         self.parallel.set_limiter(false, -0.3, 0.05, LimiterStyle::Transparent);
+        self.parallel.set_limiter_stage(false);
         // final stage: true-peak limiter only.
         self.limiter.set_glue(false, -18.0, 2.0, 3.0, 1.0);
         self.limiter.set_limiter(true, -0.3, 0.05, LimiterStyle::Transparent);
@@ -369,6 +377,22 @@ impl DrumBus {
         self.apply_gate();
     }
 
+    /// Phase-lock the tempo PUMP to the host beat grid. Without this the duck
+    /// free-runs from instance start — it lands at an arbitrary offset from the
+    /// beat and differs bounce-to-bounce. Only corrects >1% drift upstream, so
+    /// the per-block call never audibly nudges a locked pump. (The pump lives
+    /// on the comp stage; external-key ducking ignores the phase.)
+    pub fn sync_pump_to_beats(&mut self, pos_beats: f64) {
+        self.comp.sync_pump_to_beats(pos_beats);
+    }
+
+    /// The bus's constant latency in samples: the true-peak limiter's
+    /// look-ahead (the comp/parallel stages declare their limiter stages absent,
+    /// so they add none). Report to the host for delay compensation.
+    pub fn latency_samples(&self) -> u32 {
+        self.limiter.latency_samples()
+    }
+
     /// Panic-reset the bus's audio memory: reverb/delay tails, the gate, and the
     /// transient shapers. The kit's `reset()` (host reset / KIT-recall tail-cut)
     /// calls this so the OLD sound's echoes don't ring into the new one. All pure
@@ -478,6 +502,34 @@ impl DrumBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bus reports the limiter's look-ahead as its constant latency (the
+    /// comp/parallel stages declare their limiter stages absent, adding none),
+    /// and the beat-lock actually reaches the pump: two identical buses synced
+    /// to different beat positions duck at different phases.
+    #[test]
+    fn latency_is_limiter_only_and_pump_beat_locks() {
+        let bus = DrumBus::neutral(48_000.0);
+        assert!(bus.latency_samples() > 0, "the true-peak limiter has look-ahead");
+
+        let mut a = DrumBus::neutral(48_000.0);
+        let mut b = DrumBus::neutral(48_000.0);
+        for x in [&mut a, &mut b] {
+            x.set_tempo(120.0);
+            x.set_pump(1.0);
+        }
+        a.sync_pump_to_beats(0.0);
+        b.sync_pump_to_beats(0.5);
+        let mut diverged = false;
+        for _ in 0..2_000 {
+            a.process(0.0, 0.0);
+            b.process(0.0, 0.0);
+            if (a.pump_envelope() - b.pump_envelope()).abs() > 1e-3 {
+                diverged = true;
+            }
+        }
+        assert!(diverged, "pump phase sync must reach the duck");
+    }
 
     #[test]
     fn limiter_holds_the_ceiling_on_hot_input() {

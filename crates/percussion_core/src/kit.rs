@@ -820,6 +820,18 @@ impl DrumKit {
         self.bus.pump_envelope()
     }
 
+    /// Phase-lock the tempo pump to the host beat grid (call per block while
+    /// the transport plays; drift under 1% is left alone upstream).
+    pub fn sync_pump_to_beats(&mut self, pos_beats: f64) {
+        self.bus.sync_pump_to_beats(pos_beats);
+    }
+
+    /// The kit's constant output latency (the bus limiter's look-ahead), for
+    /// host delay compensation.
+    pub fn latency_samples(&self) -> u32 {
+        self.bus.latency_samples()
+    }
+
     /// Panic-reset: silence every voice, clear filter/tail state, and flush the
     /// bus's audio memory (reverb/delay tails, gate) — the KIT-recall tail-cut
     /// and host reset both rely on this actually cutting EVERYTHING.
