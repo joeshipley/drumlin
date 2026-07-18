@@ -39,7 +39,11 @@ pub enum KitRow {
     ModSlot { slot: u8, src: u8, dst: u8, depth: f32, voice: u8 },
     /// LFO config (`idx` 0/1): shape discriminant, rate Hz, depth, retrigger.
     Lfo { idx: u8, shape: u8, rate: f32, depth: f32, retrig: bool },
-    /// Mod-env attack + decay (seconds).
+    /// Mod-env attack + decay (seconds). No factory kit currently ships one
+    /// (Bladerunner's was dropped in the de-mud pass — three stacked sweeps
+    /// dulled the kit), but the variant stays: it's part of the pinned KitRow
+    /// address space, decoded by stage_kit and available to future kits.
+    #[allow(dead_code)]
     ModEnv { attack: f32, decay: f32 },
     /// A bus-FX host param: `id` is the `pget!` gesture id `1..9`, `norm` `0..1`.
     Bus { id: u8, norm: f32 },

@@ -8,6 +8,7 @@
 //! a live, editable step grid in the PRISM webview. The per-voice tail, bus FX,
 //! mod matrix and KITS arrive at M3+. See `docs/drumlin-plan.md`.
 
+pub mod dig;
 mod kits;
 mod presets;
 mod worlds;
