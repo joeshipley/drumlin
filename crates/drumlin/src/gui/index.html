@@ -142,6 +142,7 @@
   .dig-cell.c1 { background: rgba(224,163,62,0.8); }
   .dig-cell.c2 { background: rgba(224,163,62,0.35); }
   .dig-cell.c3 { background: var(--accent); box-shadow: 0 0 4px rgba(224,163,62,0.5); }
+  .dig-cell.c4 { background: rgba(224,163,62,0.10); border: 1px solid rgba(224,163,62,0.45); box-sizing: border-box; }
   .dig-actions { display: flex; gap: 6px; margin-top: 7px; }
   .dig-act { flex: 1; text-align: center; font-family: var(--mono); font-size: 9px; letter-spacing: 1px; padding: 4px 0; border: 1px solid var(--hair); border-radius: 5px; color: var(--text-2); cursor: default; }
   .dig-act.keep { border-color: rgba(224,163,62,0.4); color: var(--accent); }
@@ -270,7 +271,7 @@
         </div>
         <div class="dig-bar dig-mutrow" id="digMutRow"></div>
         <div class="dig-cards" id="digCards"></div>
-        <div class="voice-hint">Pick a terrain (THIS WORLD digs in the recalled kit's dialect), set the knobs, hit DIG. <b>▶</b> auditions in tempo — the candidate plays from scratch slot 16, switched at the loop boundary; click again to return. <b>KEEP</b> commits it to the first free slot (undoable). <b>MUTATE</b> digs variations of the current pattern instead — <b>LOCK</b> lanes come through verbatim (your kick stays your kick), DEPTH sets how far the rest wanders. While auditioning, <b>⚡ BREED</b> re-digs offspring of that candidate crossed with fresh rolls. Every dig is an address: the same seed reproduces the same groove, forever.</div>
+        <div class="voice-hint">Pick a terrain (THIS WORLD digs in the recalled kit's dialect), set the knobs, hit DIG. <b>▶</b> auditions in tempo — the candidate plays from scratch slot 16, switched at the loop boundary; click again to return. <b>KEEP</b> commits it to the first free slot (undoable). <b>MUTATE</b> digs variations of the current pattern instead — <b>LOCK</b> lanes come through verbatim (your kick stays your kick), DEPTH sets how far the rest wanders. While auditioning, <b>⚡ BREED</b> re-digs offspring of that candidate crossed with fresh rolls. <b>MOTION</b> writes the living payload — probability that breathes per loop, evolving Ratio conditions, ratchet ramps, filter/pitch/decay p-locks, micro feel, and <b>pre-wired fills</b> (hollow cells: they sound only while FILL is held). Every dig is an address: the same seed reproduces the same groove, forever.</div>
       </div>
       <div class="kits-wrap" id="kitsView" style="display:none">
         <div class="voice-h">KITS · GROOVE WORLDS — recall the whole machine in one touch</div>
@@ -868,7 +869,7 @@
     wrap.className = "dig-mini";
     const codes = Array.from({ length: N_TRACKS }, () => Array(16).fill(0));
     (cells || []).forEach(c => {
-      if (c.t < N_TRACKS && c.s < 16 && c.on) codes[c.t][c.s] = c.accent ? 3 : (c.prob < 100 ? 2 : 1);
+      if (c.t < N_TRACKS && c.s < 16 && c.on) codes[c.t][c.s] = c.cond === 1 ? 4 : c.accent ? 3 : (c.prob < 100 ? 2 : 1);
     });
     for (let t = 0; t < N_TRACKS; t++) {
       const row = document.createElement("div");

@@ -22,6 +22,12 @@ pub const PURPOSE_DRIFT_PITCH: u32 = 3;
 pub const PURPOSE_DRIFT_LEVEL: u32 = 4;
 /// M6 mod-matrix `RandomPerHit` source (independent of drift's 3/4).
 pub const PURPOSE_MOD_RANDOM: u32 = 6;
+/// M11: the per-LOOP scramble mixed into probability rolls. Chance re-rolls
+/// every pattern loop (that's what "probability" means on a drum machine) while
+/// staying a pure function of (pattern seed, loop index) — a bounce still
+/// reproduces bit-exactly. FEEL draws (humanize timing/velocity, drift) stay
+/// per-cell frozen: the groove's hand is consistent, its dice are alive.
+pub const PURPOSE_PROB_LOOP: u32 = 7;
 
 /// Cents → frequency ratio: `2^(cents/1200)`. Exactly `1.0` at 0 cents, so a
 /// drift of 0 is a bit-exact no-op multiply on a voice's pitch. A non-finite

@@ -26,7 +26,7 @@
 //! chunks 2-5.
 
 use percussion_core::rng::mix_seed;
-use percussion_core::{Pattern, XorShift32, MAX_TRACKS};
+use percussion_core::{LockableParam, Pattern, TrigCondition, XorShift32, MAX_TRACKS};
 
 /// Digs author the classic 16-step bar (patterns can still be edited longer).
 pub const DIG_STEPS: usize = 16;
@@ -45,6 +45,17 @@ const P_PROB: u32 = 19;
 const P_RATCHET: u32 = 20;
 const P_MUTATE: u32 = 21;
 const P_SPLICE: u32 = 22;
+// MOTION payload draws (c5). Each feature uses its purpose for the APPLY
+// threshold and purpose + P_VAL_OFF for its VALUE, so application stays
+// monotonic in the knob (deeper motion adds features, never rerolls them).
+const P_COND: u32 = 23;
+const P_RAMP: u32 = 24;
+const P_PLOCK_CUT: u32 = 25;
+const P_PLOCK_PITCH: u32 = 26;
+const P_PLOCK_DECAY: u32 = 27;
+const P_MICRO: u32 = 28;
+const P_FILL: u32 = 29;
+const P_VAL_OFF: u32 = 64;
 
 /// The four DIG knobs, all `0..=1`.
 #[derive(Clone, Copy, Debug)]
@@ -375,7 +386,7 @@ pub fn dig_one(terrain: &Terrain, knobs: &DigKnobs, seed: u32) -> Pattern {
                 (100.0 - depth * 45.0).round() as u8
             };
 
-            // A taste of ratchets on motor/color lanes (ramps arrive in c5).
+            // Ratchets on motor/color lanes (their ramps arrive in apply_motion).
             st.ratchet = if matches!(lane.role, Role::Motor | Role::Color)
                 && cell01(seed, t as u32, s as u32, P_RATCHET) < knobs.motion * 0.10
             {
@@ -385,7 +396,115 @@ pub fn dig_one(terrain: &Terrain, knobs: &DigKnobs, seed: u32) -> Pattern {
             };
         }
     }
+    apply_motion(&mut p, terrain, knobs, seed);
     p
+}
+
+/// The MOTION layer (c5): write the LIVING payload — pre-wired FILL hits,
+/// Ratio/NotFill conditions, ratchet ramps, p-locks, micro nudges — scaled by
+/// the knob, role-aware, per-cell seeded (deterministic + monotonic: deeper
+/// motion adds features to the same dig, never rerolls it). The anchor lanes
+/// stay pure: the spine is sacred.
+fn apply_motion(p: &mut Pattern, terrain: &Terrain, knobs: &DigKnobs, seed: u32) {
+    let m = knobs.motion.clamp(0.0, 1.0);
+    if m <= 0.0 {
+        return;
+    }
+    for (t, lane) in terrain.lanes.iter().enumerate() {
+        if lane.activity <= 0.0 {
+            continue;
+        }
+        let tu = t as u32;
+        for s in 0..DIG_STEPS {
+            let su = s as u32;
+            let st = &mut p.tracks[t].steps[s];
+            if st.on {
+                match lane.role {
+                    Role::Anchor => {}
+                    Role::Backbeat => {
+                        // The big hits lay back a touch; ghosts push/pull.
+                        st.micro = if lane.prior[s] >= 80 {
+                            (m * 6.0 * cell01(seed, tu, su, P_MICRO)).round() as i16
+                        } else {
+                            ((cell01(seed, tu, su, P_MICRO) - 0.5) * 2.0 * m * 10.0).round() as i16
+                        };
+                        // Occasional dying drag-roll on a ghost (flam ramp).
+                        if lane.prior[s] < 80
+                            && st.ratchet == 1
+                            && cell01(seed, tu, su, P_RAMP) < m * 0.12
+                        {
+                            st.ratchet = 2 + (cell01(seed, tu, su, P_RAMP + P_VAL_OFF) * 1.99) as u8;
+                            st.ratchet_ramp =
+                                (-(40.0 + cell01(seed, tu, su, P_RAMP + P_VAL_OFF) * 50.0)) as i8;
+                        }
+                        // A shortened/lengthened tail now and then.
+                        if st.plock_count < 2 && cell01(seed, tu, su, P_PLOCK_DECAY) < m * 0.15 {
+                            st.set_plock(
+                                LockableParam::Decay.index(),
+                                0.3 + cell01(seed, tu, su, P_PLOCK_DECAY + P_VAL_OFF) * 0.4,
+                            );
+                        }
+                    }
+                    Role::Motor => {
+                        // The hat filter dance.
+                        if st.plock_count < 2 && cell01(seed, tu, su, P_PLOCK_CUT) < m * 0.30 {
+                            st.set_plock(
+                                LockableParam::Cutoff.index(),
+                                0.35 + cell01(seed, tu, su, P_PLOCK_CUT + P_VAL_OFF) * 0.6,
+                            );
+                        }
+                        // Existing rolls become builds.
+                        if st.ratchet > 1 && st.ratchet_ramp == 0 {
+                            st.ratchet_ramp =
+                                (40.0 + cell01(seed, tu, su, P_RAMP + P_VAL_OFF) * 50.0) as i8;
+                        }
+                        // Non-identity motor hits duck out during fills — space
+                        // for the pre-wired fill to speak.
+                        if lane.prior[s] < 80 && cell01(seed, tu, su, P_COND) < m * 0.12 {
+                            st.condition = TrigCondition::NotFill;
+                        }
+                    }
+                    Role::Color => {
+                        st.micro =
+                            ((cell01(seed, tu, su, P_MICRO) - 0.5) * 2.0 * m * 12.0).round() as i16;
+                        // Every-other-bar evolution.
+                        if cell01(seed, tu, su, P_COND) < m * 0.20 {
+                            let a = if cell01(seed, tu, su, P_COND + P_VAL_OFF) < 0.5 { 1 } else { 2 };
+                            st.condition = TrigCondition::Ratio { a, b: 2 };
+                        }
+                        // Melodic pitch stabs + occasional tail play.
+                        if st.plock_count < 2 && cell01(seed, tu, su, P_PLOCK_PITCH) < m * 0.22 {
+                            st.set_plock(
+                                LockableParam::Pitch.index(),
+                                0.5 + (cell01(seed, tu, su, P_PLOCK_PITCH + P_VAL_OFF) - 0.5) * 0.3,
+                            );
+                        }
+                        if st.plock_count < 2 && cell01(seed, tu, su, P_PLOCK_DECAY) < m * 0.12 {
+                            st.set_plock(
+                                LockableParam::Decay.index(),
+                                0.3 + cell01(seed, tu, su, P_PLOCK_DECAY + P_VAL_OFF) * 0.4,
+                            );
+                        }
+                    }
+                }
+            } else if s >= 10 && matches!(lane.role, Role::Color | Role::Backbeat) {
+                // PRE-WIRED FILLS: extra late-bar hits that sound ONLY while the
+                // FILL button is held. The dig arrives with its fill built.
+                if cell01(seed, tu, su, P_FILL) < m * 0.30 * lane.activity {
+                    st.on = true;
+                    st.condition = TrigCondition::Fill;
+                    let conf = lane.prior[s].max(55) as f32 / 100.0;
+                    let base = lerp(lane.vel_lo.max(60) as f32, lane.vel_hi.max(80) as f32, conf);
+                    st.velocity = (base.round() as i32).clamp(40, 127) as u8;
+                    st.probability = 100;
+                    if cell01(seed, tu, su, P_FILL + P_VAL_OFF) < 0.35 {
+                        st.ratchet = 2;
+                        st.ratchet_ramp = 55; // fills build
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A surfaced dig: the address, its interestingness, and the groove itself.
@@ -540,7 +659,9 @@ pub fn score(terrain: &Terrain, p: &Pattern, knobs: &DigKnobs) -> f32 {
     for t in 0..MAX_TRACKS {
         for (s, c) in col.iter_mut().enumerate() {
             let st = &p.tracks[t].steps[s];
-            if st.on {
+            // Fill-only steps are silent on the normal pass — the score judges
+            // what the groove SOUNDS like, not its fill reserve.
+            if st.on && st.condition != TrigCondition::Fill {
                 total += 1;
                 *c += 1;
                 if s % 4 != 0 {
@@ -713,7 +834,16 @@ mod tests {
                                             assert!((1..=127).contains(&st.velocity));
                                             assert!((1..=100).contains(&st.probability));
                                             assert!((1..=8).contains(&st.ratchet));
-                                            assert_eq!(st.plocks().len(), 0);
+                                            assert!((-100..=100).contains(&st.ratchet_ramp));
+                                            assert!(st.micro.abs() <= 48, "micro stays in slider range");
+                                            assert!(st.plocks().len() <= 2, "at most 2 motion p-locks");
+                                            for pl in st.plocks() {
+                                                assert!(
+                                                    LockableParam::from_index(pl.param).is_some(),
+                                                    "p-lock param must decode"
+                                                );
+                                                assert!((0.0..=1.0).contains(&pl.value));
+                                            }
                                         }
                                     }
                                 }
@@ -863,6 +993,112 @@ mod tests {
     }
 
     #[test]
+    fn motion_zero_is_a_static_pattern() {
+        // With MOTION at 0 the dig is pure notes: no conditions, no p-locks, no
+        // micro, no ramps, every probability at 100.
+        for t in TERRAINS {
+            let p = dig_one(t, &DigKnobs { motion: 0.0, ..DigKnobs::default() }, 0xCAFE);
+            for tr in 0..MAX_TRACKS {
+                for s in 0..DIG_STEPS {
+                    let st = &p.tracks[tr].steps[s];
+                    assert_eq!(st.condition, TrigCondition::Always, "{}: no conditions", t.id);
+                    assert_eq!(st.plocks().len(), 0, "{}: no p-locks", t.id);
+                    assert_eq!(st.micro, 0, "{}: no micro", t.id);
+                    assert_eq!(st.ratchet_ramp, 0, "{}: no ramps", t.id);
+                    if st.on {
+                        assert_eq!(st.probability, 100, "{}: no chance", t.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn motion_one_writes_the_full_living_payload() {
+        // At full MOTION, across a handful of seeds, every payload kind appears:
+        // pre-wired FILL hits, evolving/ducking conditions, p-locks, micro,
+        // ratchet ramps, and sub-100 probability. Deterministic scan.
+        let t = terrain("disco").unwrap();
+        let k = DigKnobs { motion: 1.0, ..DigKnobs::default() };
+        let (mut fill, mut cond, mut plock, mut micro, mut ramp, mut prob) =
+            (false, false, false, false, false, false);
+        for seed in 0..30u32 {
+            let p = dig_one(t, &k, seed);
+            for tr in 0..MAX_TRACKS {
+                for s in 0..DIG_STEPS {
+                    let st = &p.tracks[tr].steps[s];
+                    if !st.on {
+                        continue;
+                    }
+                    match st.condition {
+                        TrigCondition::Fill => fill = true,
+                        TrigCondition::NotFill | TrigCondition::Ratio { .. } => cond = true,
+                        _ => {}
+                    }
+                    if !st.plocks().is_empty() {
+                        plock = true;
+                    }
+                    if st.micro != 0 {
+                        micro = true;
+                    }
+                    if st.ratchet_ramp != 0 {
+                        ramp = true;
+                    }
+                    if st.probability < 100 {
+                        prob = true;
+                    }
+                }
+            }
+        }
+        assert!(fill, "pre-wired FILL hits must appear");
+        assert!(cond, "Ratio/NotFill conditions must appear");
+        assert!(plock, "p-locks must appear");
+        assert!(micro, "micro nudges must appear");
+        assert!(ramp, "ratchet ramps must appear");
+        assert!(prob, "sub-100 probability must appear");
+    }
+
+    #[test]
+    fn fill_extras_sound_only_while_fill_is_held() {
+        // The headline: a motion-heavy dig arrives with its fill built. Find a
+        // dig carrying a Fill step, play one bar with and without FILL held —
+        // the held pass must add hits on that lane.
+        let t = terrain("disco").unwrap();
+        let k = DigKnobs { motion: 1.0, ..DigKnobs::default() };
+        let mut found = None;
+        'scan: for seed in 0..40u32 {
+            let p = dig_one(t, &k, seed);
+            for tr in 0..MAX_TRACKS {
+                for s in 0..DIG_STEPS {
+                    let st = &p.tracks[tr].steps[s];
+                    if st.on && st.condition == TrigCondition::Fill {
+                        found = Some((p, tr));
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        let (p, tr) = found.expect("full motion must write a fill extra within 40 seeds");
+        let count = |fill: bool| {
+            let mut state = SeqState::default();
+            state.patterns[0] = p;
+            state.current = 0;
+            let mut seq = Sequencer::new();
+            seq.import(&state);
+            seq.set_fill(fill);
+            seq.set_playing(true);
+            let sr = 48_000.0;
+            let bar = (4.0 * 0.5 * sr) as usize;
+            seq.process_block(0.0, 120.0, sr, bar);
+            seq.pending().iter().filter(|g| g.track as usize == tr).count()
+        };
+        assert!(
+            count(true) > count(false),
+            "holding FILL must add the pre-wired hits on lane {tr}"
+        );
+    }
+
+    #[test]
     fn splice_and_breed_are_lane_coherent() {
         let t = terrain("techno").unwrap();
         let k = DigKnobs::default();
@@ -894,10 +1130,10 @@ mod tests {
 
     #[test]
     fn terrains_speak_their_dialects() {
-        // Character tests at WILD = 0 (pure priors: a 0-prior cell is a
-        // GUARANTEED rest, so dialect signatures are structural, not luck).
-        // Deterministic: fixed base seeds, top-of-48 candidates.
-        let k = DigKnobs { wild: 0.0, ..DigKnobs::default() };
+        // Character tests at WILD = 0 + MOTION = 0 (pure priors: a 0-prior cell
+        // is a GUARANTEED rest and no fill extras appear, so dialect signatures
+        // are structural, not luck). Deterministic: fixed base seeds, top-of-48.
+        let k = DigKnobs { wild: 0.0, motion: 0.0, ..DigKnobs::default() };
         let top = |t: &Terrain, seed: u32| dig_best(t, &k, seed, 1).remove(0).pattern;
 
         // DISCO: four-on-the-floor + THE off-8th open hat.

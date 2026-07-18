@@ -829,9 +829,19 @@ impl Sequencer {
             return;
         }
         // 2. probability — each cell rolls from its OWN seed (a pure function of
-        //    seed+coordinates), so editing one step never re-rolls another.
+        //    seed+coordinates), so editing one step never re-rolls another. The
+        //    LOOP index is mixed in (purpose 7) so chance re-rolls every pass —
+        //    a 50% step actually flickers loop to loop — while the whole
+        //    performance stays a pure function of (seed, loop): bounces still
+        //    reproduce bit-exactly, honoring the GROOVE LOCK.
         if step.probability < 100 {
-            let mut r = XorShift32::new(mix_seed(self.pattern.seed, t as u32, step_idx as u32, 0));
+            let cell = mix_seed(self.pattern.seed, t as u32, step_idx as u32, 0);
+            let mut r = XorShift32::new(mix_seed(
+                cell,
+                loop_u as u32,
+                (loop_u >> 32) as u32,
+                crate::drift::PURPOSE_PROB_LOOP,
+            ));
             if r.next_below(100) >= step.probability as u32 {
                 return;
             }
@@ -1157,8 +1167,12 @@ mod tests {
     }
 
     #[test]
-    fn probability_groove_lock_repeats_each_loop() {
-        // With a frozen seed, loop 2 must fire the same probabilistic steps as loop 1.
+    fn probability_groove_lock_repeats_each_transport_pass() {
+        // The GROOVE LOCK contract, post-M11: probability re-rolls per LOOP
+        // (chance is alive — see probability_breathes_per_loop_...), but the
+        // whole performance is a pure function of (seed, loop index) — so
+        // playing the SAME transport span again fires the SAME hits at the same
+        // offsets. That's what makes a bounce bit-reproducible.
         let mut seq = Sequencer::new();
         for s in 0..16 {
             seq.pattern.tracks[7].steps[s] = Step { on: true, probability: 50, ..Default::default() };
@@ -1167,19 +1181,13 @@ mod tests {
         let sr = 48_000.0;
         let bar = (4.0 * 0.5 * sr) as usize;
         seq.process_block(0.0, 120.0, sr, bar);
-        let loop0: Vec<u32> = seq.pending().iter().filter(|t| t.track == 7).map(|t| t.offset).collect();
-        seq.process_block(4.0, 120.0, sr, bar); // next loop (16 steps = 4 quarter notes)
-        let loop1: Vec<u32> = seq.pending().iter().filter(|t| t.track == 7).map(|t| t.offset).collect();
-        // GROOVE LOCK guarantees the same probabilistic DECISIONS each loop (same
-        // steps fire); the per-sample offset can differ by ~1 sample of f64
-        // accumulation drift between loops, which is musically irrelevant.
-        assert_eq!(loop0.len(), loop1.len(), "GROOVE LOCK must fire the same hits each loop");
-        for (a, b) in loop0.iter().zip(loop1.iter()) {
-            assert!(
-                (*a as i64 - *b as i64).abs() <= 2,
-                "groove-locked hits should align within a sample or two: {a} vs {b}"
-            );
-        }
+        let pass1: Vec<u32> = seq.pending().iter().filter(|t| t.track == 7).map(|t| t.offset).collect();
+        // Relocate back to the top (discontinuity resets the epoch) and replay.
+        seq.reset_playhead();
+        seq.process_block(0.0, 120.0, sr, bar);
+        let pass2: Vec<u32> = seq.pending().iter().filter(|t| t.track == 7).map(|t| t.offset).collect();
+        assert_eq!(pass1, pass2, "replaying the same span must reproduce bit-exactly");
+        assert!(!pass1.is_empty() && pass1.len() < 16, "50% should fire some, not all: {}", pass1.len());
     }
 
     #[test]
@@ -1463,6 +1471,32 @@ mod tests {
         seq.process_block(1.0, tempo, sr, 24_000); // covers boundary 4 itself
         let second = seq.pending().iter().filter(|t| t.track == 10).count();
         assert_eq!(second, 0, "its own boundary pass must consume the early-fire marker");
+    }
+
+    #[test]
+    fn probability_breathes_per_loop_but_reproduces_per_run() {
+        // A 50% step must actually flicker across loops (chance is alive) while
+        // two identical runs produce the identical firing pattern (the GROOVE
+        // LOCK: everything is a pure function of seed + loop index).
+        fn firing_pattern() -> Vec<bool> {
+            let mut seq = Sequencer::new();
+            seq.select_pattern(1); // empty slot
+            seq.set_step_params(10, 0, true, 100, false, 50, 1, 0, 0, TrigCondition::Always);
+            seq.set_playing(true);
+            let sr = 48_000.0;
+            let bar = (4.0 * 0.5 * sr) as usize;
+            let mut fired = Vec::new();
+            for loop_i in 0..16 {
+                seq.process_block(loop_i as f64 * 4.0, 120.0, sr, bar);
+                fired.push(seq.pending().iter().any(|t| t.track == 10));
+            }
+            fired
+        }
+        let a = firing_pattern();
+        let b = firing_pattern();
+        assert_eq!(a, b, "the same seed + loops must reproduce bit-exactly");
+        assert!(a.iter().any(|&x| x), "a 50% step must fire sometimes");
+        assert!(a.iter().any(|&x| !x), "a 50% step must also skip sometimes");
     }
 
     #[test]

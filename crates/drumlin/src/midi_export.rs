@@ -66,7 +66,13 @@ pub fn pattern_to_midi(p: &Pattern) -> Vec<u8> {
                 continue;
             }
             if st.probability < 100 {
-                let mut r = XorShift32::new(mix_seed(p.seed, t as u32, s as u32, 0));
+                // The engine's exact loop-0 roll (per-cell seed mixed with the
+                // loop index via PURPOSE_PROB_LOOP).
+                let cell = mix_seed(p.seed, t as u32, s as u32, 0);
+                let mut r = XorShift32::new(mix_seed(
+                    cell, 0, 0,
+                    percussion_core::drift::PURPOSE_PROB_LOOP,
+                ));
                 if r.next_below(100) >= st.probability as u32 {
                     continue;
                 }
