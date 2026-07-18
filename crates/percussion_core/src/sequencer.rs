@@ -627,6 +627,20 @@ impl Sequencer {
         self.early_fired = [i64::MIN; MAX_TRACKS];
     }
 
+    /// Write a whole pattern into a bank slot (the DIG audition/keep path). If
+    /// the slot is the LIVE one, the working pattern is replaced too — otherwise
+    /// the live->bank flush on the next switch would clobber the load. Content
+    /// only: selection/queueing stays with `select_pattern`. Allocation-free
+    /// (one `Pattern` memcpy), so it is audio-thread safe.
+    pub fn load_slot(&mut self, idx: usize, p: Pattern) {
+        if let Some(slot) = self.bank.get_mut(idx) {
+            *slot = p;
+            if idx == self.current {
+                self.pattern = p;
+            }
+        }
+    }
+
     /// Snapshot the live bank into `state` for persistence. Allocation-free when
     /// `state` is already sized to the bank (the `Default`), so it is safe to
     /// call from the audio thread under a non-blocking `try_lock`.
@@ -1447,6 +1461,29 @@ mod tests {
         seq.process_block(1.0, tempo, sr, 24_000); // covers boundary 4 itself
         let second = seq.pending().iter().filter(|t| t.track == 10).count();
         assert_eq!(second, 0, "its own boundary pass must consume the early-fire marker");
+    }
+
+    #[test]
+    fn load_slot_writes_bank_and_live() {
+        let mut seq = Sequencer::new();
+        let mut p = Pattern::default();
+        p.tracks[10].steps[3].on = true;
+        // Non-current slot: bank only; the live pattern is untouched.
+        seq.load_slot(5, p);
+        assert!(!seq.step_on(10, 3), "live pattern untouched by a non-current load");
+        seq.select_pattern(5);
+        assert!(seq.step_on(10, 3), "the loaded slot carries the content");
+        // Current slot: the live pattern updates too (else the live->bank flush
+        // on the next switch would clobber the load).
+        let mut q = Pattern::default();
+        q.tracks[11].steps[7].on = true;
+        seq.load_slot(5, q);
+        assert!(seq.step_on(11, 7), "a current-slot load replaces the live pattern");
+        seq.select_pattern(0);
+        seq.select_pattern(5);
+        assert!(seq.step_on(11, 7), "the load survives a switch round-trip");
+        // Out of range: a no-op, never a panic.
+        seq.load_slot(99, q);
     }
 
     #[test]

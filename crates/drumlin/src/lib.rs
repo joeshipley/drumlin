@@ -42,6 +42,10 @@ const PAD_VELOCITY: f32 = 0.9;
 /// Max undo/redo depth (whole-pattern snapshots).
 const UNDO_CAP: usize = 64;
 
+/// The DIG audition slot: candidates play from here via the queued-switch path
+/// (slot 16 on the chips). Its previous content is undo-snapshotted first.
+const SCRATCH_SLOT: u8 = 15;
+
 /// Editor -> audio sequencer edits, sent over a lock-free ring and applied at
 /// block start. POD/`Copy` so the ring never allocates.
 #[derive(Clone, Copy)]
@@ -107,6 +111,12 @@ enum Action {
     MidiLearn { macro_idx: u8 },
     /// Clear any CC bound to a macro (and disarm if it was learning).
     MidiClear { macro_idx: u8 },
+    /// Excavate: roll candidates from a terrain at the given knobs + base seed.
+    Dig { terrain: String, kit_id: String, density: f32, sync: f32, motion: f32, wild: f32, base_seed: u32 },
+    /// Audition candidate `idx` in tempo (scratch slot + queued switch).
+    DigAudition { idx: u8 },
+    /// Commit candidate `idx` into bank slot `slot` (undo-snapshotted).
+    DigKeep { idx: u8, slot: u8 },
     Undo,
     Redo,
     Transport { play: bool },
@@ -394,6 +404,13 @@ pub struct Drumlin {
     /// `seq_dirty`) — otherwise a CC performance is lost on save, and any
     /// recall adopt (even a pattern undo) yanks the macros back to stale values.
     macros_dirty: bool,
+    /// DIG pattern mailbox: the editor stages a whole `Pattern` for a bank slot
+    /// (audition -> the scratch slot, keep -> a chosen slot); the audio thread
+    /// adopts it at block start via `Sequencer::load_slot` WITHOUT the recall
+    /// path (no playhead reset — the groove keeps running and the queued switch
+    /// lands on the loop boundary). `Some` persists until the audio thread's
+    /// try_lock wins, so a contended block simply retries.
+    dig_stage: Arc<Mutex<Option<(u8, Pattern)>>>,
 
     /// Preallocated per-sample aux stem accumulator (one stereo pair per aux
     /// output bus), filled by `kit.render_into` — keeps `process` alloc-free.
@@ -432,6 +449,7 @@ impl Default for Drumlin {
             seq_dirty: false,
             persisted_seq_enabled: true,
             macros_dirty: false,
+            dig_stage: Arc::new(Mutex::new(None)),
             aux_scratch: [(0.0, 0.0); N_AUX],
         }
     }
@@ -853,6 +871,10 @@ impl Plugin for Drumlin {
         let redo_stack: Arc<Mutex<Vec<(usize, Pattern)>>> = Arc::new(Mutex::new(Vec::new()));
         let cc_to_macro = self.cc_to_macro.clone();
         let learn_arm = self.learn_arm.clone();
+        let dig_stage = self.dig_stage.clone();
+        // The last dig's candidates, held editor-side so audition/keep reference
+        // by index instead of round-tripping whole patterns through JSON.
+        let last_dig: Arc<Mutex<Vec<dig::DigCandidate>>> = Arc::new(Mutex::new(Vec::new()));
         // Last macro->CC map sent to the GUI (suppress unchanged sends).
         let last_macro_cc = Arc::new(Mutex::new([-1i32; 8]));
         // Set when the MIDI-learn map changes; the persist is retried each tick
@@ -974,6 +996,22 @@ impl Plugin for Drumlin {
                     }
                 }};
             }
+            // Shared undo push (slot-tagged, top-duplicate-suppressed, redo
+            // branch dropped) — used by the pre-edit snapshot below and by the
+            // DIG audition/keep arms.
+            let push_undo = |slot: usize, p: Pattern| {
+                if let Ok(mut u) = undo_stack.lock() {
+                    if u.last().is_none_or(|(ls, lp)| *ls != slot || *lp != p) {
+                        u.push((slot, p));
+                        if u.len() > UNDO_CAP {
+                            u.remove(0);
+                        }
+                    }
+                }
+                if let Ok(mut r) = redo_stack.lock() {
+                    r.clear();
+                }
+            };
             while let Ok(value) = ctx.next_event() {
                 let Ok(action) = serde_json::from_value::<Action>(value) else {
                     continue;
@@ -985,21 +1023,12 @@ impl Plugin for Drumlin {
                 // lags the audio thread by ~a block, so a rapid edit burst would
                 // otherwise push duplicate stale snapshots (dead Undo presses).
                 if action_mutates_pattern(&action) {
-                    if let Ok(s) = params.state.lock() {
+                    let snap = params.state.lock().ok().and_then(|s| {
                         let cur = s.seq.current as usize;
-                        if let Some(p) = s.seq.patterns.get(cur).copied() {
-                            if let Ok(mut u) = undo_stack.lock() {
-                                if u.last().is_none_or(|(ls, lp)| *ls != cur || *lp != p) {
-                                    u.push((cur, p));
-                                    if u.len() > UNDO_CAP {
-                                        u.remove(0);
-                                    }
-                                }
-                            }
-                            if let Ok(mut r) = redo_stack.lock() {
-                                r.clear();
-                            }
-                        }
+                        s.seq.patterns.get(cur).copied().map(|p| (cur, p))
+                    });
+                    if let Some((cur, p)) = snap {
+                        push_undo(cur, p);
                     }
                 }
                 match action {
@@ -1266,6 +1295,85 @@ impl Plugin for Drumlin {
                         }
                         cleared_watch.store(macro_idx as i8, Ordering::Relaxed);
                     }
+                    Action::Dig { terrain, kit_id, density, sync, motion, wild, base_seed } => {
+                        // Resolve the dig site: THIS WORLD speaks the recalled
+                        // kit's dialect; unknown ids fall back to techno.
+                        let t = if terrain == "this-world" {
+                            dig::terrain_for_world(&kit_id)
+                        } else {
+                            dig::terrain(&terrain).unwrap_or(&dig::TECHNO)
+                        };
+                        let knobs = dig::DigKnobs {
+                            density: density.clamp(0.0, 1.0),
+                            sync: sync.clamp(0.0, 1.0),
+                            motion: motion.clamp(0.0, 1.0),
+                            wild: wild.clamp(0.0, 1.0),
+                        };
+                        let cands = dig::dig_best(t, &knobs, base_seed, dig::N_CANDIDATES);
+                        let msg = json!({
+                            "type": "dig-results",
+                            "terrain": t.id,
+                            "candidates": cands.iter().map(|c| json!({
+                                "seed": c.seed,
+                                "score": c.score,
+                                "swing": c.pattern.swing,
+                                "humanize": c.pattern.humanize,
+                                "cells": pattern_cells(&c.pattern),
+                            })).collect::<Vec<_>>(),
+                        });
+                        if let Ok(mut ld) = last_dig.lock() {
+                            *ld = cands;
+                        }
+                        ctx.send_json(msg);
+                    }
+                    Action::DigAudition { idx } => {
+                        // Stage the candidate into the scratch slot (its old
+                        // content undo-snapshotted) + queue the switch. Content
+                        // lands via the mailbox BEFORE the same-block select, and
+                        // the groove keeps running (no recall, no playhead reset).
+                        let cand =
+                            last_dig.lock().ok().and_then(|ld| ld.get(idx as usize).map(|c| c.pattern));
+                        if let Some(p) = cand {
+                            let old = params.state.lock().ok().and_then(|s| {
+                                s.seq.patterns.get(SCRATCH_SLOT as usize).copied()
+                            });
+                            if let Some(old) = old {
+                                push_undo(SCRATCH_SLOT as usize, old);
+                            }
+                            if let Ok(mut st) = dig_stage.lock() {
+                                *st = Some((SCRATCH_SLOT, p));
+                            }
+                            push_edit!(SeqEdit::SelectPattern { idx: SCRATCH_SLOT });
+                        }
+                    }
+                    Action::DigKeep { idx, slot } => {
+                        // Commit the candidate into a real slot: undo-snapshot the
+                        // displaced content, mirror the persisted state (so a host
+                        // save right now is coherent), stage for the audio bank,
+                        // and select it (queued at the loop boundary if playing).
+                        let cand =
+                            last_dig.lock().ok().and_then(|ld| ld.get(idx as usize).map(|c| c.pattern));
+                        if let Some(p) = cand {
+                            let slot = slot.min(SCRATCH_SLOT); // bank is 16 slots
+                            let mut staged = false;
+                            if let Ok(mut s) = params.state.lock() {
+                                if let Some(old) = s.seq.patterns.get(slot as usize).copied() {
+                                    push_undo(slot as usize, old);
+                                }
+                                if let Some(sp) = s.seq.patterns.get_mut(slot as usize) {
+                                    *sp = p;
+                                    staged = true;
+                                }
+                            }
+                            if staged {
+                                if let Ok(mut st) = dig_stage.lock() {
+                                    *st = Some((slot, p));
+                                }
+                                push_edit!(SeqEdit::SelectPattern { idx: slot });
+                                ctx.send_json(json!({ "type": "dig-kept", "slot": slot }));
+                            }
+                        }
+                    }
                     Action::Undo => restore_from!(undo_stack, redo_stack),
                     Action::Redo => restore_from!(redo_stack, undo_stack),
                     Action::Transport { play } => internal_play.store(play, Ordering::Relaxed),
@@ -1439,6 +1547,18 @@ impl Plugin for Drumlin {
                 self.seq_dirty = false;
                 self.kit.reset(); // cut tails at the jump
                 self.recall_pending.store(false, Ordering::Relaxed);
+            }
+        }
+
+        // DIG mailbox: adopt a staged audition/keep pattern into the bank
+        // (content only — the queued switch arrives via the edit ring below, so
+        // draining FIRST guarantees a same-block stage+select sees the content).
+        // No playhead reset: the groove keeps running. On try_lock contention
+        // the stage stays Some and simply retries next block.
+        if let Ok(mut stage) = self.dig_stage.try_lock() {
+            if let Some((slot, p)) = stage.take() {
+                self.seq.load_slot(slot as usize, p);
+                self.seq_dirty = true;
             }
         }
 
@@ -1976,6 +2096,29 @@ mod tests {
                     assert!(made_sound, "GROOVE WORLD {} produced no sound", kit.id);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn dig_candidate_cells_mirror_the_pattern() {
+        // The GUI writes its local bank mirror from the dig-results cells; every
+        // sounding step must round-trip with its full payload or grid edits on a
+        // kept dig would send wrong values back.
+        let t = dig::terrain("techno").expect("registered");
+        let c = dig::dig_best(t, &dig::DigKnobs::default(), 0xD16, 1).remove(0);
+        let cells = pattern_cells(&c.pattern);
+        let on_count: usize = (0..MAX_TRACKS)
+            .map(|tr| (0..16).filter(|&s| c.pattern.tracks[tr].steps[s].on).count())
+            .sum();
+        assert_eq!(cells.len(), on_count, "one cell per sounding step (digs carry no bare p-locks)");
+        for cell in &cells {
+            let tr = cell["t"].as_u64().unwrap() as usize;
+            let s = cell["s"].as_u64().unwrap() as usize;
+            let st = &c.pattern.tracks[tr].steps[s];
+            assert!(st.on);
+            assert_eq!(cell["vel"].as_u64().unwrap() as u8, st.velocity);
+            assert_eq!(cell["prob"].as_u64().unwrap() as u8, st.probability);
+            assert_eq!(cell["rat"].as_u64().unwrap() as u8, st.ratchet);
         }
     }
 

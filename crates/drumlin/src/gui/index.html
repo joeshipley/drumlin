@@ -116,6 +116,31 @@
   @keyframes blink { 50% { opacity: 0.3; } }
   /* ---- KITS page ---- */
   .kits-wrap { flex: 1; padding: 14px 18px; overflow-y: auto; }
+  .dig-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0 12px; }
+  .dig-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .dig-chip { font-family: var(--mono); font-size: 9px; letter-spacing: 1px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--dim); cursor: default; }
+  .dig-chip.on { color: var(--accent); border-color: rgba(224,163,62,0.5); background: rgba(224,163,62,0.10); }
+  .dig-knobs { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .dig-knob { display: flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 9px; letter-spacing: 1px; color: var(--dim); }
+  .dig-knob b { color: var(--text-2); min-width: 20px; font-weight: 500; }
+  .dig-go { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; color: #131311; background: var(--accent); border: none; border-radius: 8px; padding: 9px 20px; cursor: default; margin-left: auto; }
+  .dig-go:active { transform: scale(0.97); }
+  .dig-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .dig-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+  .dig-card.play { border-color: rgba(224,163,62,0.55); background: rgba(224,163,62,0.05); }
+  .dig-chead { display: flex; justify-content: space-between; align-items: center; font-family: var(--mono); font-size: 9px; letter-spacing: 0.5px; color: var(--accent); margin-bottom: 6px; }
+  .dig-chead .sc { color: var(--dim); font-size: 8px; }
+  .dig-mini { display: flex; flex-direction: column; gap: 2px; }
+  .dig-row { display: flex; gap: 2px; }
+  .dig-cell { flex: 1; height: 5px; border-radius: 1px; background: var(--bg-2); }
+  .dig-cell.q { background: #171a1f; }
+  .dig-cell.c1 { background: rgba(224,163,62,0.8); }
+  .dig-cell.c2 { background: rgba(224,163,62,0.35); }
+  .dig-cell.c3 { background: var(--accent); box-shadow: 0 0 4px rgba(224,163,62,0.5); }
+  .dig-actions { display: flex; gap: 6px; margin-top: 7px; }
+  .dig-act { flex: 1; text-align: center; font-family: var(--mono); font-size: 9px; letter-spacing: 1px; padding: 4px 0; border: 1px solid var(--hair); border-radius: 5px; color: var(--text-2); cursor: default; }
+  .dig-act.keep { border-color: rgba(224,163,62,0.4); color: var(--accent); }
+  .dig-act:hover { border-color: var(--accent); }
   .kits-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .kit-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 13px; cursor: default; transition: border-color 0.1s; }
   .kit-card:hover { border-color: rgba(224,163,62,0.4); }
@@ -199,6 +224,7 @@
         <div class="rail-btn" data-view="voice">VOICE</div>
         <div class="rail-btn" data-view="mix">MIX</div>
         <div class="rail-btn" data-view="mod">MOD</div>
+        <div class="rail-btn" data-view="dig">DIG</div>
         <div class="rail-btn" data-view="kits">KITS</div>
       </div>
       <div class="grid-wrap"><div class="grid" id="grid"></div></div>
@@ -228,6 +254,16 @@
           </div>
         </div>
         <div class="voice-hint">Route any source → destination, per voice (or All); DEPTH is bipolar (double-click = 0). LFOs free-run (set rate/shape). Saved with the project.</div>
+      </div>
+      <div class="dig-wrap" id="digView" style="display:none">
+        <div class="voice-h">DIG · groove excavation — seed-addressable generation</div>
+        <div class="dig-bar">
+          <span class="dig-chips" id="digChips"></span>
+          <span class="dig-knobs" id="digKnobs"></span>
+          <button id="digBtn" class="dig-go">⛏ DIG</button>
+        </div>
+        <div class="dig-cards" id="digCards"></div>
+        <div class="voice-hint">Pick a terrain (THIS WORLD digs in the recalled kit's dialect), set the knobs, hit DIG. <b>▶</b> auditions in tempo — the candidate plays from scratch slot 16, switched at the loop boundary; click again to return. <b>KEEP</b> commits it to the first free slot (undoable). Every dig is an address: the same seed reproduces the same groove, forever.</div>
       </div>
       <div class="kits-wrap" id="kitsView" style="display:none">
         <div class="voice-h">KITS · GROOVE WORLDS — recall the whole machine in one touch</div>
@@ -684,7 +720,135 @@
   const voiceViewEl = document.getElementById("voiceView");
   const mixViewEl = document.getElementById("mixView");
   const modViewEl = document.getElementById("modView");
+  const digViewEl = document.getElementById("digView");
   const kitsViewEl = document.getElementById("kitsView");
+  // ---- DIG page (M11): groove excavation ----
+  const DIG_TERRAINS = [["this-world", "THIS WORLD"], ["techno", "TECHNO"], ["breaks", "BREAKS"], ["disco", "DISCO"], ["halftime", "HALFTIME"], ["footwork", "FOOTWORK"]];
+  const SCRATCH = 15;
+  let digTerrain = "this-world";
+  let digKnobsV = { density: 0.6, sync: 0.4, motion: 0.5, wild: 0.25 };
+  let digCands = [];       // last dig-results candidates
+  let digAudIdx = -1;      // auditioning candidate (-1 = none)
+  let digReturnSlot = null; // where ■ RETURN goes back to
+
+  function buildDig() {
+    const chips = document.getElementById("digChips");
+    chips.innerHTML = "";
+    DIG_TERRAINS.forEach(([id, name]) => {
+      const c = document.createElement("span");
+      c.className = "dig-chip" + (id === digTerrain ? " on" : "");
+      c.textContent = name;
+      c.addEventListener("click", () => { digTerrain = id; buildDig(); });
+      chips.appendChild(c);
+    });
+    const kn = document.getElementById("digKnobs");
+    kn.innerHTML = "";
+    [["density", "DENS"], ["sync", "SYNC"], ["motion", "MOTN"], ["wild", "WILD"]].forEach(([k, label]) => {
+      const w = document.createElement("span");
+      w.className = "dig-knob";
+      const l = document.createElement("span"); l.textContent = label;
+      const r = document.createElement("input");
+      r.type = "range"; r.min = 0; r.max = 100; r.step = 1;
+      r.value = Math.round(digKnobsV[k] * 100); r.style.width = "56px";
+      const v = document.createElement("b"); v.textContent = Math.round(digKnobsV[k] * 100);
+      r.addEventListener("input", () => { digKnobsV[k] = +r.value / 100; v.textContent = r.value; });
+      w.appendChild(l); w.appendChild(r); w.appendChild(v); kn.appendChild(w);
+    });
+    renderDigCards();
+  }
+
+  function renderDigCards() {
+    const grid = document.getElementById("digCards");
+    grid.innerHTML = "";
+    digCands.forEach((c, i) => {
+      const card = document.createElement("div");
+      card.className = "dig-card" + (i === digAudIdx ? " play" : "");
+      const seedHex = (c.seed >>> 0).toString(16).toUpperCase().padStart(8, "0");
+      const dots = Math.max(1, Math.min(5, Math.round(c.score * 5)));
+      const head = document.createElement("div");
+      head.className = "dig-chead";
+      head.innerHTML = `<span>${i === digAudIdx ? "▶" : "·"} DIG ${seedHex}</span><span class="sc" title="interestingness ${Math.round(c.score * 100)}%">${"●".repeat(dots)}${"○".repeat(5 - dots)}</span>`;
+      card.appendChild(head);
+      card.appendChild(digMini(c.cells));
+      const acts = document.createElement("div");
+      acts.className = "dig-actions";
+      const aud = document.createElement("span");
+      aud.className = "dig-act";
+      aud.textContent = i === digAudIdx ? "■ RETURN" : "▶ AUDITION";
+      aud.addEventListener("click", () => digAudition(i));
+      const keep = document.createElement("span");
+      keep.className = "dig-act keep";
+      keep.textContent = "KEEP";
+      keep.addEventListener("click", () => digKeep(i));
+      acts.appendChild(aud); acts.appendChild(keep); card.appendChild(acts);
+      grid.appendChild(card);
+    });
+  }
+
+  function digMini(cells) {
+    const wrap = document.createElement("div");
+    wrap.className = "dig-mini";
+    const codes = Array.from({ length: N_TRACKS }, () => Array(16).fill(0));
+    (cells || []).forEach(c => {
+      if (c.t < N_TRACKS && c.s < 16 && c.on) codes[c.t][c.s] = c.accent ? 3 : (c.prob < 100 ? 2 : 1);
+    });
+    for (let t = 0; t < N_TRACKS; t++) {
+      const row = document.createElement("div");
+      row.className = "dig-row";
+      for (let s = 0; s < 16; s++) {
+        const d = document.createElement("span");
+        d.className = "dig-cell" + (codes[t][s] ? " c" + codes[t][s] : (s % 4 === 0 ? " q" : ""));
+        row.appendChild(d);
+      }
+      wrap.appendChild(row);
+    }
+    return wrap;
+  }
+
+  // Write a candidate into the GUI's local bank mirror + feel meta (the engine
+  // gets the same content via the mailbox, so painting stays truthful).
+  function applyCandToSlot(c, slot) {
+    bank[slot] = blankPat();
+    (c.cells || []).forEach(x => {
+      const plk = {};
+      (x.plocks || []).forEach(pl => { plk[pl.param] = pl.value; });
+      bank[slot][x.t][x.s] = { on: !!x.on, vel: x.vel, accent: !!x.accent, prob: x.prob, rat: x.rat, ramp: x.ramp || 0, cond: x.cond, ra: x.ra || 1, rb: x.rb || 2, micro: x.micro || 0, plk };
+    });
+    patMeta[slot] = { length: 16, swing: c.swing ?? 50, humanize: c.humanize ?? 0 };
+  }
+
+  function digAudition(i) {
+    if (i === digAudIdx) {
+      // ■ RETURN: back to where we were, in tempo.
+      const back = digReturnSlot ?? 0;
+      digAudIdx = -1; digReturnSlot = null;
+      selectPattern(back);
+      renderDigCards();
+      return;
+    }
+    if (digReturnSlot === null) digReturnSlot = cur !== SCRATCH ? cur : 0;
+    digAudIdx = i;
+    applyCandToSlot(digCands[i], SCRATCH);
+    send({ type: "dig-audition", idx: i });
+    patEls.forEach((e, p) => e.classList.toggle("queued", p === SCRATCH));
+    renderDigCards();
+  }
+
+  function digKeep(i) {
+    let slot = -1;
+    for (let p = 0; p < SCRATCH; p++) { if (!patUsed(p)) { slot = p; break; } }
+    if (slot < 0) slot = cur !== SCRATCH ? cur : 0;
+    applyCandToSlot(digCands[i], slot);
+    send({ type: "dig-keep", idx: i, slot });
+    digAudIdx = -1; digReturnSlot = null;
+    refreshPats(); renderDigCards();
+  }
+
+  document.getElementById("digBtn").addEventListener("click", () => {
+    const base = (Math.random() * 0x100000000) >>> 0;
+    send({ type: "dig", terrain: digTerrain, kit_id: curKitId || "", density: digKnobsV.density, sync: digKnobsV.sync, motion: digKnobsV.motion, wild: digKnobsV.wild, base_seed: base });
+  });
+
   function setView(name) {
     curView = name;
     document.querySelectorAll(".rail-btn").forEach(b => b.classList.toggle("on", b.dataset.view === name));
@@ -694,10 +858,12 @@
     voiceViewEl.style.display = name === "voice" ? "" : "none";
     mixViewEl.style.display = name === "mix" ? "" : "none";
     modViewEl.style.display = name === "mod" ? "" : "none";
+    digViewEl.style.display = name === "dig" ? "" : "none";
     kitsViewEl.style.display = name === "kits" ? "" : "none";
     if (name === "voice") buildVoice();
     if (name === "mix") buildMix();
     if (name === "mod") buildMod();
+    if (name === "dig") buildDig();
     if (name === "kits") buildKits();
   }
   document.querySelector(".rail").addEventListener("click", (e) => {
@@ -940,6 +1106,13 @@
     } else if (msg.type === "presets") {
       // Save/delete refreshed the disk list.
       presetList = msg.presets || []; if (curView === "kits") buildKits();
+    } else if (msg.type === "dig-results") {
+      digCands = msg.candidates || [];
+      digAudIdx = -1;
+      if (curView === "dig") renderDigCards();
+    } else if (msg.type === "dig-kept") {
+      // Committed engine-side; the slot chips repaint via the status echo.
+      if (curView === "dig") renderDigCards();
     } else if (msg.type === "ab-active") {
       // The plugin confirms accepted stores/recalls; an empty-register click
       // is refused engine-side and sends nothing.
