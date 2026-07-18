@@ -303,8 +303,7 @@ pub fn terrain(id: &str) -> Option<&'static Terrain> {
 /// supply in its genre. Neutral (or an unknown/no kit) speaks the bare
 /// machine's tongue: techno.
 pub fn terrain_for_world(kit_id: &str) -> &'static Terrain {
-    crate::kits::FACTORY_KITS
-        .iter()
+    crate::kits::factory_kits()
         .find(|k| k.id == kit_id)
         .and_then(|k| terrain(k.terrain))
         .unwrap_or(&TECHNO)
@@ -1182,7 +1181,7 @@ mod tests {
     #[test]
     fn every_factory_world_has_a_terrain_dialect() {
         // THIS WORLD must resolve every factory kit to a REGISTERED terrain.
-        for kit in crate::kits::FACTORY_KITS {
+        for kit in crate::kits::factory_kits() {
             let t = terrain_for_world(kit.id);
             assert!(
                 TERRAINS.iter().any(|x| std::ptr::eq(*x, t)),

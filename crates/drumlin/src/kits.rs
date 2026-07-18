@@ -90,15 +90,23 @@ pub static NEUTRAL: Kit = Kit {
     pattern: None,
 };
 
-/// The factory kit/world list, surfaced in the KITS page: Neutral (the anchor)
-/// + the flagship GROOVE WORLDS. Grows toward a 50+ library.
-pub static FACTORY_KITS: &[&Kit] = &[
+/// The hand-authored core: Neutral (the anchor) + the flagship GROOVE WORLDS.
+static CORE_KITS: &[&Kit] = &[
     &NEUTRAL,
     &crate::worlds::DISCOTHEQUE,
     &crate::worlds::MARSEILLE,
     &crate::worlds::BLADERUNNER,
     &crate::worlds::OUTRUN,
 ];
+
+/// Every factory kit the KITS page surfaces: the core chained with the BAKED
+/// library (`kits_baked.rs`, generated from `crates/drumlin/kits/*.kit.json`
+/// by `cargo xtask bake-kits` — see that folder's README for the graduation
+/// flow). Baked kits are timbral-only; their grooves come from the DIG in
+/// their `terrain` dialect.
+pub fn factory_kits() -> impl Iterator<Item = &'static Kit> {
+    CORE_KITS.iter().copied().chain(crate::kits_baked::BAKED_KITS.iter().copied())
+}
 
 #[cfg(test)]
 mod tests {
@@ -117,11 +125,31 @@ mod tests {
     }
 
     #[test]
+    fn factory_ids_are_unique_and_terrains_registered() {
+        // Baked kits join the same namespace as the core — a duplicate id would
+        // make recall ambiguous, and a typo'd terrain tag would silently dig
+        // techno. Both must fail loudly here.
+        let mut ids: Vec<&str> = factory_kits().map(|k| k.id).collect();
+        let n = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "factory kit ids must be unique");
+        for kit in factory_kits() {
+            assert!(
+                crate::dig::terrain(kit.terrain).is_some(),
+                "kit `{}` has unregistered terrain `{}`",
+                kit.id,
+                kit.terrain
+            );
+        }
+    }
+
+    #[test]
     fn neutral_is_an_empty_lens() {
         assert!(NEUTRAL.rows.is_empty(), "Neutral must override nothing (byte-exact)");
         assert!(NEUTRAL.pattern.is_none(), "Neutral leaves the pattern alone");
         assert_eq!(NEUTRAL.macro_labels, DEFAULT_MACRO_LABELS);
         // Neutral is the first factory entry the GUI shows.
-        assert!(FACTORY_KITS.iter().any(|k| k.id == "neutral"));
+        assert!(factory_kits().any(|k| k.id == "neutral"));
     }
 }

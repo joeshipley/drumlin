@@ -11,6 +11,7 @@
 pub mod dig;
 mod kitfiles;
 mod kits;
+mod kits_baked;
 pub mod midi_export;
 mod presets;
 mod worlds;
@@ -733,7 +734,7 @@ fn bank_json(seq: &SeqState, voices: &VoicePatch, mix: &VoiceMix, mod_state: &Mo
         },
         // The factory KITS / GROOVE WORLDS for the KITS page (id + name + blurb +
         // whether it carries a pattern). Recall is wired in chunk 2.
-        "kits": kits::FACTORY_KITS.iter().map(|k| json!({
+        "kits": kits::factory_kits().map(|k| json!({
             "id": k.id, "name": k.name, "blurb": k.blurb, "world": k.pattern.is_some(),
         })).collect::<Vec<_>>(),
     })
@@ -911,8 +912,7 @@ fn action_mutates_pattern(a: &Action) -> bool {
         | Action::ClearPlock { .. }
         | Action::ClearLane { .. }
         | Action::Euclid { .. } => true,
-        Action::RecallKit { id } => kits::FACTORY_KITS
-            .iter()
+        Action::RecallKit { id } => kits::factory_kits()
             .find(|k| k.id == id.as_str())
             .is_some_and(|k| k.pattern.is_some()),
         _ => false,
@@ -1311,7 +1311,7 @@ impl Plugin for Drumlin {
                         }
                     }
                     Action::RecallKit { id } => {
-                        if let Some(kit) = kits::FACTORY_KITS.iter().find(|k| k.id == id.as_str()) {
+                        if let Some(kit) = kits::factory_kits().find(|k| k.id == id.as_str()) {
                             // Stage the percussion_core half AND build the full GUI
                             // re-seed under one lock (a recall replaces the grid,
                             // voice/mix/mod pages, and bus sliders — sending only
@@ -2259,7 +2259,7 @@ mod tests {
 
     #[test]
     fn all_factory_kits_stage_cleanly() {
-        for kit in kits::FACTORY_KITS {
+        for kit in kits::factory_kits() {
             let mut state = PersistState::default();
             let _ = stage_kit(&mut state, kit);
             // A GROOVE WORLD must have loaded a non-empty groove into the slot.
@@ -2277,7 +2277,7 @@ mod tests {
         // Off, an out-of-range track/field/bus id) would silently do nothing.
         // Catch it before ship.
         use kits::KitRow;
-        for kit in kits::FACTORY_KITS {
+        for kit in kits::factory_kits() {
             for row in kit.rows {
                 match *row {
                     KitRow::Voice { track, param, .. } => {
@@ -2330,7 +2330,7 @@ mod tests {
         // couple of bars with the macros at both rails. Every sample must be
         // finite + bus-limited, and a GROOVE WORLD must actually make sound.
         let sr = 48_000.0_f32;
-        for kit in kits::FACTORY_KITS {
+        for kit in kits::factory_kits() {
             for macros in [[0.0_f32; 8], [1.0_f32; 8]] {
                 let mut state = PersistState::default();
                 let staged = stage_kit(&mut state, kit);
