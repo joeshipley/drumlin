@@ -120,6 +120,25 @@ impl VoiceMixRow {
         }
     }
 
+    /// The exact inverse of [`Self::set`]'s encoding, field for field —
+    /// `set(f, get(f))` is an identity. Powers the EXPORT-KIT diff (a kit is
+    /// the minimal set of fields where `get` differs from the default's).
+    pub fn get(&self, field: u8) -> f32 {
+        match field {
+            0 => self.send_a,
+            1 => self.send_b,
+            2 => f32::from(self.mute),
+            3 => f32::from(self.solo),
+            4 => f32::from(self.gated_verb),
+            5 => f32::from(self.choke_group),
+            6 => self.eq_low_norm(),
+            7 => self.eq_high_norm(),
+            8 => f32::from(self.output),
+            9 => self.drift,
+            _ => 0.0,
+        }
+    }
+
     fn snap_send(value: f32) -> f32 {
         let v = value.clamp(0.0, 1.0);
         if v > SEND_FLOOR {

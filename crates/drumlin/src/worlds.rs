@@ -49,6 +49,7 @@ pub static DISCOTHEQUE: Kit = Kit {
     id: "discotheque",
     name: "Discothèque",
     blurb: "Daft Punk · French house",
+    terrain: "disco",
     rows: &[
         KitRow::Bus { id: 1, norm: 0.75 },  // pump (the headline duck)
         KitRow::Bus { id: 5, norm: 0.5 },   // pump rate = 1/4
@@ -85,6 +86,7 @@ pub static MARSEILLE: Kit = Kit {
     id: "marseille",
     name: "Marseille",
     blurb: "French 79 · 808 half-time",
+    terrain: "halftime",
     rows: &[
         KitRow::Bus { id: 4, norm: 0.30 },  // tape delay (was 0.42 — was smearing)
         KitRow::Bus { id: 3, norm: 0.16 },  // room kept subtle; per-voice sends do the work
@@ -122,6 +124,7 @@ pub static BLADERUNNER: Kit = Kit {
     id: "bladerunner",
     name: "Bladerunner",
     blurb: "Vangelis · cavernous toms",
+    terrain: "cavern",
     rows: &[
         // The cavern comes from TARGETED tom sends (below), not a global wash —
         // the kick/ride stay dry + present. Room kept low; toms carry the space.
@@ -161,6 +164,7 @@ pub static OUTRUN: Kit = Kit {
     id: "outrun",
     name: "Outrun",
     blurb: "80s gated · synthwave",
+    terrain: "outrun",
     rows: &[
         KitRow::Bus { id: 3, norm: 0.18 },  // global room subtle; the snare's gated verb is the 80s space (was 0.45)
         KitRow::Bus { id: 9, norm: 0.3 },   // short gate (the snap)

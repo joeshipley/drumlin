@@ -298,17 +298,16 @@ pub fn terrain(id: &str) -> Option<&'static Terrain> {
     TERRAINS.iter().find(|t| t.id == id).copied()
 }
 
-/// THIS WORLD: the dig dialect for a recalled factory kit. Digs in Bladerunner
-/// come out sparse and cavernous; in Discothèque, four-on-the-floor. Neutral
-/// (or an unknown/no kit) speaks the bare machine's tongue: techno.
+/// THIS WORLD: the dig dialect for a recalled factory kit — read from the
+/// kit's own `terrain` tag, so every library kit ships with an infinite groove
+/// supply in its genre. Neutral (or an unknown/no kit) speaks the bare
+/// machine's tongue: techno.
 pub fn terrain_for_world(kit_id: &str) -> &'static Terrain {
-    match kit_id {
-        "discotheque" => &DISCO,
-        "marseille" => &HALFTIME,
-        "bladerunner" => &CAVERN,
-        "outrun" => &OUTRUN_T,
-        _ => &TECHNO,
-    }
+    crate::kits::FACTORY_KITS
+        .iter()
+        .find(|k| k.id == kit_id)
+        .and_then(|k| terrain(k.terrain))
+        .unwrap_or(&TECHNO)
 }
 
 #[inline]

@@ -156,6 +156,8 @@
   .kit-card .kit-blurb { font-family: var(--mono); font-size: 8px; letter-spacing: 0.3px; color: var(--dim-3); margin-top: 3px; }
   .kit-card .kit-world { float: right; color: var(--accent); font-size: 9px; }
   .kits-ph { font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; color: var(--dim-3); margin: 20px 0 8px; }
+  .kits-dir { color: var(--dim-3); letter-spacing: 0.5px; text-transform: none; margin-left: 6px; opacity: 0.8; }
+  .kit-terr { font-family: var(--mono); font-size: 7px; letter-spacing: 1px; color: var(--dim); margin-top: 4px; }
   .kits-saverow { display: flex; gap: 8px; margin-bottom: 10px; }
   .kits-saverow input { flex: 0 0 220px; font-family: var(--mono); font-size: 10px; background: var(--panel-2); color: var(--dim); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; }
   .kit-savebtn { font-family: var(--mono); font-size: 9px; letter-spacing: 1px; color: var(--dim); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: default; }
@@ -285,10 +287,13 @@
           <button class="ab-copy" id="abCopy" title="copy the active register to the other">⇄</button>
         </div>
         <div class="kits-grid" id="kitsGrid"></div>
+        <div class="kits-ph">MY KITS <span class="kits-dir">~/Music/Drumlin/Kits</span></div>
+        <div class="kits-grid" id="kitsUser"></div>
         <div class="kits-ph">USER PRESETS</div>
         <div class="kits-saverow">
-          <input id="presetName" type="text" placeholder="preset name" maxlength="64">
+          <input id="presetName" type="text" placeholder="preset / kit name" maxlength="64">
           <button id="presetSave" class="kit-savebtn">SAVE CURRENT</button>
+          <button id="kitExport" class="kit-savebtn" title="Capture the machine's sound as a .kit.json (the diff vs Neutral) — appears under MY KITS, revealed in Finder, and carries the current DIG dialect">EXPORT KIT</button>
         </div>
         <div class="kits-presets" id="kitsPresets"></div>
         <div class="voice-hint">A KIT recalls all 12 voices + bus FX + the mod matrix; a GROOVE WORLD (★) also loads its pattern. SAVE snapshots the whole machine to disk; click a preset to load it.</div>
@@ -1049,6 +1054,7 @@
   // ---- KITS page ----
   let kitList = [];      // [{id, name, blurb, world}] factory kits from Init
   let presetList = [];   // user preset names (disk) from Init / "presets" msgs
+  let userKits = [];     // MY KITS (.kit.json names) from Init / "user-kits" msgs
   let curKitId = null;   // highlighted kit id
   function buildKits() {
     const root = document.getElementById("kitsGrid");
@@ -1066,6 +1072,28 @@
       });
       root.appendChild(card);
     });
+    // MY KITS (~/Music/Drumlin/Kits): captured/hand-edited .kit.json files,
+    // recalled exactly like factory kits; grooves come from DIG in their dialect.
+    const ur = document.getElementById("kitsUser");
+    ur.innerHTML = "";
+    userKits.forEach(name => {
+      const id = "user:" + name;
+      const card = document.createElement("div");
+      card.className = "kit-card" + (id === curKitId ? " on" : "");
+      card.innerHTML = `<div class="kit-name">${name}</div><div class="kit-blurb">my kit</div>`;
+      card.addEventListener("click", () => {
+        curKitId = id;
+        buildKits();
+        send({ type: "recall-user-kit", name });
+      });
+      ur.appendChild(card);
+    });
+    if (!userKits.length) {
+      const hint = document.createElement("div");
+      hint.className = "kit-terr";
+      hint.textContent = "none yet — EXPORT KIT captures the current sound";
+      ur.appendChild(hint);
+    }
     // User presets (disk): click to load, × to delete.
     const pr = document.getElementById("kitsPresets");
     pr.innerHTML = "";
@@ -1083,6 +1111,12 @@
     const el = document.getElementById("presetName");
     const name = (el.value || "").trim();
     if (name) { send({ type: "preset-save", name }); el.value = ""; }
+  });
+  document.getElementById("kitExport").addEventListener("click", () => {
+    const el = document.getElementById("presetName");
+    const name = (el.value || "").trim() || "My Kit";
+    send({ type: "export-kit", name, kit_id: curKitId || "" });
+    el.value = "";
   });
   // A/B compare bar.
   function setAbActive(slot) {
@@ -1172,6 +1206,7 @@
       if (Array.isArray(msg.macro_cc)) { macroCc = msg.macro_cc; if (curView === "mod") buildMod(); }
       // Seed the user-preset browser list.
       if (Array.isArray(msg.presets)) { presetList = msg.presets; if (curView === "kits") buildKits(); }
+      if (Array.isArray(msg.user_kits)) { userKits = msg.user_kits; if (curView === "kits") buildKits(); }
     } else if (msg.type === "macro-labels") {
       // A KIT recall relabeled the macros: update + repaint if on the MOD page.
       if (Array.isArray(msg.labels)) { macroLabels = msg.labels; if (curView === "mod") buildMod(); }
@@ -1185,6 +1220,18 @@
     } else if (msg.type === "presets") {
       // Save/delete refreshed the disk list.
       presetList = msg.presets || []; if (curView === "kits") buildKits();
+    } else if (msg.type === "user-kits") {
+      // EXPORT KIT landed (or the folder changed): refresh MY KITS; flash the
+      // export button so the click visibly took.
+      userKits = msg.kits || [];
+      if (curView === "kits") buildKits();
+      if (msg.exported) {
+        const b = document.getElementById("kitExport");
+        const old = b.textContent;
+        b.textContent = "✓ " + msg.exported;
+        b.style.color = "var(--accent)";
+        setTimeout(() => { b.textContent = old; b.style.color = ""; }, 1400);
+      }
     } else if (msg.type === "dig-results") {
       digCands = msg.candidates || [];
       digAudIdx = -1;

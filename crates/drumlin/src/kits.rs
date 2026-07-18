@@ -13,6 +13,7 @@
 //! goldens are untouched.
 
 use percussion_core::Pattern;
+use serde::{Deserialize, Serialize};
 
 /// The default K1–K8 macro labels (design §4.5) — what Neutral and any kit that
 /// doesn't relabel shows. Display-only; never touches DSP.
@@ -24,7 +25,10 @@ pub const DEFAULT_MACRO_LABELS: [&str; 8] =
 /// patch, the mod dests, and the mix. The recall path decodes each variant onto
 /// the matching `DrumKit` / plugin setter. A kit lists only what it touches;
 /// anything absent stays at the default.
-#[derive(Clone, Copy, Debug)]
+/// Serde: user kits persist rows as JSON (`.kit.json`), externally tagged with
+/// kebab-case variant names — `{"voice": {...}}`, `{"bus": {...}}`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum KitRow {
     /// Per-voice tail patch default: `param` is a `LockableParam` index `0..5`
     /// (Level/Pan/Cutoff/Resonance/Drive — the `N_TAIL_PARAMS` patch subset;
@@ -58,6 +62,10 @@ pub struct Kit {
     pub name: &'static str,
     /// Short attribution shown under the name (e.g. "Daft Punk"). Display-only.
     pub blurb: &'static str,
+    /// The kit's DIG dialect (a registered terrain id): THIS WORLD digs speak
+    /// this. Every kit ships with an infinite groove supply instead of one
+    /// canned pattern.
+    pub terrain: &'static str,
     /// The curated parameter overrides; empty = "all defaults" (Neutral).
     pub rows: &'static [KitRow],
     /// K1–K8 labels for this world (display-only — relabels the MOD page knobs).
@@ -76,6 +84,7 @@ pub static NEUTRAL: Kit = Kit {
     id: "neutral",
     name: "Neutral",
     blurb: "the bare machine",
+    terrain: "techno",
     rows: &[],
     macro_labels: DEFAULT_MACRO_LABELS,
     pattern: None,

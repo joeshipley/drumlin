@@ -48,7 +48,7 @@ pub(crate) fn presets_dir() -> Option<PathBuf> {
 /// Sanitize a user name into a safe filename stem: alphanumerics + space / - / _
 /// only (anything else -> `_`), trimmed + length-capped, never empty and never a
 /// path separator. Prevents traversal and odd filenames.
-fn sanitize_stem(name: &str) -> String {
+pub(crate) fn sanitize_stem(name: &str) -> String {
     let mut s: String = name
         .chars()
         .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })

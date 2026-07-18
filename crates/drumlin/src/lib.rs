@@ -9,6 +9,7 @@
 //! mod matrix and KITS arrive at M3+. See `docs/drumlin-plan.md`.
 
 pub mod dig;
+mod kitfiles;
 mod kits;
 pub mod midi_export;
 mod presets;
@@ -134,6 +135,11 @@ enum Action {
     DigAudition { idx: u8 },
     /// Commit candidate `idx` into bank slot `slot` (undo-snapshotted).
     DigKeep { idx: u8, slot: u8 },
+    /// Export the machine's current sound as a .kit.json (the diff vs Neutral),
+    /// revealed in Finder. `kit_id` resolves the DIG terrain tag.
+    ExportKit { name: String, kit_id: String },
+    /// Recall a user kit from ~/Music/Drumlin/Kits by name.
+    RecallUserKit { name: String },
     /// Export a bank slot's pattern as a .mid (revealed in Finder for drag-in).
     ExportMidi { slot: u8 },
     /// Export dig candidate `idx` as a .mid the same way (no keep needed).
@@ -198,7 +204,7 @@ struct DrumlinParams {
 /// per-voice patch (the VOICE editor's defaults).
 /// One LFO's persisted config. `shape` is the `ModLfoShape` discriminant
 /// (0=Sine, 1=Triangle, 2=Saw, 3=Square, 4=SampleHold).
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct LfoCfg {
     shape: u8,
     rate_hz: f32,
@@ -209,7 +215,7 @@ struct LfoCfg {
 /// The persisted M6 mod state: the 16-slot matrix + the 2 LFO configs + the
 /// mod-env (attack/decay) + the 8 macro knob values. Default = an all-Off matrix
 /// + the `ModEngine`'s default LFOs + macros 0 → fully inert (no modulation).
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ModState {
     #[serde(default)]
     matrix: DrumModMatrix,
@@ -567,14 +573,43 @@ struct StagedBus {
 /// recall is deterministic regardless of prior state, and Neutral (empty rows,
 /// no pattern) reproduces the defaults exactly. Editor-thread only.
 fn stage_kit(state: &mut PersistState, kit: &kits::Kit) -> StagedBus {
-    use kits::KitRow;
+    stage_reset(state);
+    state.macro_labels = kit.macro_labels.map(String::from);
+    let staged = stage_rows(state, kit.rows);
+    // GROOVE WORLD: build the embedded groove (editor-thread) and load it into
+    // the selected pattern slot.
+    if let Some(build) = kit.pattern {
+        let cur = state.seq.current as usize;
+        if let Some(slot) = state.seq.patterns.get_mut(cur) {
+            *slot = build();
+        }
+    }
+    staged
+}
+
+/// Stage a USER kit (`.kit.json`) — same lens semantics, owned data, no
+/// pattern (grooves come from the DIG in the kit's terrain dialect).
+fn stage_kit_def(state: &mut PersistState, def: &kitfiles::KitDef) -> StagedBus {
+    stage_reset(state);
+    state.macro_labels = def.macro_labels.clone();
+    stage_rows(state, &def.rows)
+}
+
+/// Reset the lens-controlled state to its defaults (a kit is a COMPLETE lens:
+/// recall is deterministic regardless of prior state).
+fn stage_reset(state: &mut PersistState) {
     state.voices = VoicePatch::default();
     state.mix = VoiceMix::default();
     state.mod_state = ModState::default();
-    state.macro_labels = kit.macro_labels.map(String::from);
+}
+
+/// Apply a kit's curated rows onto freshly-reset state, collecting the bus-FX
+/// values + sidechain for the host-param gesture bridge.
+fn stage_rows(state: &mut PersistState, rows: &[kits::KitRow]) -> StagedBus {
+    use kits::KitRow;
     let mut bus: [Option<f32>; 10] = [None; 10];
     let mut sidechain = None;
-    for row in kit.rows {
+    for row in rows {
         match *row {
             KitRow::Voice { track, param, norm } => {
                 if let Some(p) = LockableParam::from_index(param as u16) {
@@ -616,14 +651,6 @@ fn stage_kit(state: &mut PersistState, kit: &kits::Kit) -> StagedBus {
                 }
             }
             KitRow::Sidechain(b) => sidechain = Some(b),
-        }
-    }
-    // GROOVE WORLD: build the embedded groove (editor-thread) and load it into
-    // the selected pattern slot.
-    if let Some(build) = kit.pattern {
-        let cur = state.seq.current as usize;
-        if let Some(slot) = state.seq.patterns.get_mut(cur) {
-            *slot = build();
         }
     }
     StagedBus { bus, sidechain }
@@ -747,6 +774,10 @@ fn full_json(
     msg["sidechain"] = json!(sidechain);
     msg["macro_labels"] = json!(macro_labels);
     msg["presets"] = json!(user_presets);
+    // MY KITS (~/Music/Drumlin/Kits): listed here (editor-thread IO, like the
+    // preset list every caller already computes) so each full re-seed also
+    // refreshes the folder — dropping a .kit.json in shows up on next recall.
+    msg["user_kits"] = json!(kitfiles::list());
     msg
 }
 
@@ -754,6 +785,12 @@ fn full_json(
 /// unknown ids fall back to techno) and clamp the knobs.
 fn resolve_dig(terrain: &str, kit_id: &str) -> &'static dig::Terrain {
     if terrain == "this-world" {
+        // A recalled USER kit carries its dialect in its .kit.json.
+        if let Some(name) = kit_id.strip_prefix("user:") {
+            return kitfiles::load(name)
+                .and_then(|def| dig::terrain(&def.terrain))
+                .unwrap_or(&dig::TECHNO);
+        }
         dig::terrain_for_world(kit_id)
     } else {
         dig::terrain(terrain).unwrap_or(&dig::TECHNO)
@@ -769,6 +806,82 @@ fn lock_mask(locks: &[u8]) -> [bool; MAX_TRACKS] {
         }
     }
     m
+}
+
+/// EXPORT KIT: the machine's current sound as its minimal `KitRow` lens — only
+/// what differs from the Neutral defaults, using the exact inverse encodings
+/// the recall path decodes (`LockableParam::normalize`, `VoiceMixRow::get`).
+/// The property that keeps this honest: `stage_kit_def(diff_kit(state)) ==
+/// state` on the lens surface (test-pinned).
+fn diff_kit(
+    state: &PersistState,
+    bus: &[f32; 9],
+    bus_defaults: &[f32; 9],
+    sidechain: bool,
+) -> Vec<kits::KitRow> {
+    use kits::KitRow;
+    let mut rows = Vec::new();
+    let dv = VoicePatch::default();
+    for t in 0..MAX_TRACKS {
+        for p in 0..N_TAIL_PARAMS {
+            let cur = state.voices.tracks[t][p];
+            if (cur - dv.tracks[t][p]).abs() > 1e-4 {
+                if let Some(lp) = LockableParam::from_index(p as u16) {
+                    rows.push(KitRow::Voice { track: t as u8, param: p as u8, norm: lp.normalize(cur) });
+                }
+            }
+        }
+    }
+    let dm = percussion_core::VoiceMixRow::default();
+    for t in 0..MAX_TRACKS {
+        for f in 0u8..=9 {
+            let cur = state.mix.tracks[t].get(f);
+            if (cur - dm.get(f)).abs() > 1e-4 {
+                rows.push(KitRow::Mix { track: t as u8, field: f, norm: cur });
+            }
+        }
+    }
+    for (i, sl) in state.mod_state.matrix.slots.iter().enumerate() {
+        if sl.src != DrumModSource::Off && sl.dst != DrumModDest::Off {
+            rows.push(KitRow::ModSlot {
+                slot: i as u8,
+                src: sl.src.index() as u8,
+                dst: sl.dst.index() as u8,
+                depth: sl.depth,
+                voice: sl.target_voice,
+            });
+        }
+    }
+    let dms = ModState::default();
+    for (idx, (cur, def)) in [(&state.mod_state.lfo1, &dms.lfo1), (&state.mod_state.lfo2, &dms.lfo2)]
+        .into_iter()
+        .enumerate()
+    {
+        if cur != def {
+            rows.push(KitRow::Lfo {
+                idx: idx as u8,
+                shape: cur.shape,
+                rate: cur.rate_hz,
+                depth: cur.depth,
+                retrig: cur.retrig,
+            });
+        }
+    }
+    if (state.mod_state.env_attack - dms.env_attack).abs() > 1e-6
+        || (state.mod_state.env_decay - dms.env_decay).abs() > 1e-6
+    {
+        rows.push(KitRow::ModEnv { attack: state.mod_state.env_attack, decay: state.mod_state.env_decay });
+    }
+    for id in 1u8..=9 {
+        let i = (id - 1) as usize;
+        if (bus[i] - bus_defaults[i]).abs() > 1e-4 {
+            rows.push(KitRow::Bus { id, norm: bus[i] });
+        }
+    }
+    if sidechain {
+        rows.push(KitRow::Sidechain(true));
+    }
+    rows
 }
 
 /// Write `p` to `~/Music/Drumlin/<stem>.mid` and reveal it in Finder so it can
@@ -1473,6 +1586,76 @@ impl Plugin for Drumlin {
                             }
                         }
                     }
+                    Action::ExportKit { name, kit_id } => {
+                        // Capture the machine's sound as a kit: diff vs Neutral,
+                        // tag the DIG dialect from the current kit, write + reveal.
+                        let mut defaults = [0.0_f32; 9];
+                        for bid in 1u8..=9 {
+                            defaults[(bid - 1) as usize] = pget!(bid).default_normalized_value();
+                        }
+                        let def = params.state.lock().ok().map(|s| kitfiles::KitDef {
+                            format: kitfiles::FORMAT_TAG.to_string(),
+                            name: if name.trim().is_empty() { "My Kit".to_string() } else { name.clone() },
+                            blurb: "captured from Drumlin".to_string(),
+                            terrain: resolve_dig("this-world", &kit_id).id.to_string(),
+                            macro_labels: s.macro_labels.clone(),
+                            rows: diff_kit(
+                                &s,
+                                &bus_values(&params),
+                                &defaults,
+                                params.sidechain_key.value(),
+                            ),
+                        });
+                        if let Some(def) = def {
+                            if let Ok(path) = kitfiles::save(&def) {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+                                }
+                                ctx.send_json(json!({
+                                    "type": "user-kits",
+                                    "kits": kitfiles::list(),
+                                    "exported": def.name,
+                                }));
+                            }
+                        }
+                    }
+                    Action::RecallUserKit { name } => {
+                        // Same atomic recall as a factory kit, from owned data;
+                        // no pattern (grooves come from the DIG in its dialect).
+                        if let Some(def) = kitfiles::load(&name) {
+                            let plist = presets::list();
+                            let staged = params.state.lock().ok().map(|mut s| {
+                                let staged = stage_kit_def(&mut s, &def);
+                                let mut driven = [0.0_f32; 9];
+                                for bid in 1u8..=9 {
+                                    driven[(bid - 1) as usize] = staged.bus[bid as usize]
+                                        .unwrap_or_else(|| pget!(bid).default_normalized_value());
+                                }
+                                let sc = staged.sidechain.unwrap_or(false);
+                                let mut m = full_json(
+                                    &s.seq, &s.voices, &s.mix, &s.mod_state, &s.macro_labels,
+                                    &driven, sc, &plist,
+                                );
+                                m["macro_cc"] = json!(macro_cc_map(&cc_to_macro));
+                                m["kit_id"] = json!(format!("user:{name}"));
+                                recall_pending.store(true, Ordering::Relaxed);
+                                (driven, sc, m)
+                            });
+                            if let Some((driven, sc, msg)) = staged {
+                                for bid in 1u8..=9 {
+                                    let p = pget!(bid);
+                                    setter.begin_set_parameter(p);
+                                    setter.set_parameter_normalized(p, driven[(bid - 1) as usize]);
+                                    setter.end_set_parameter(p);
+                                }
+                                setter.begin_set_parameter(&params.sidechain_key);
+                                setter.set_parameter(&params.sidechain_key, sc);
+                                setter.end_set_parameter(&params.sidechain_key);
+                                ctx.send_json(msg);
+                            }
+                        }
+                    }
                     Action::ExportMidi { slot } => {
                         let p = params.state.lock().ok().and_then(|s| {
                             s.seq.patterns.get(slot.min(SCRATCH_SLOT) as usize).copied()
@@ -2041,6 +2224,7 @@ mod tests {
             id: "t",
             name: "T",
             blurb: "",
+            terrain: "techno",
             rows: &[
                 KitRow::Voice { track: 0, param: 2, norm: 0.3 }, // kick Cutoff
                 KitRow::Mix { track: 2, field: 0, norm: 0.6 },    // snare Send A
@@ -2219,6 +2403,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn exported_kit_reproduces_the_machine() {
+        // The capture workflow's honesty property: diff the machine against
+        // Neutral, stage the diff onto a FRESH machine, and the lens surface
+        // (voices/mix/mod/macro labels + staged bus/sidechain) is identical.
+        let mut s = PersistState::default();
+        s.voices.tracks[0][2] = LockableParam::Cutoff.denormalize(0.31); // dark kick
+        s.voices.tracks[11][4] = LockableParam::Drive.denormalize(0.8); // hot zap
+        s.mix.tracks[2].set(0, 0.6); // snare -> reverb
+        s.mix.tracks[5].set(5, 3.0); // hat choke group
+        s.mix.tracks[9].set(9, 0.4); // tom drift
+        s.mod_state.matrix.slots[3] = DrumModSlot {
+            src: DrumModSource::from_index(3),
+            dst: DrumModDest::from_index(3),
+            depth: -0.45,
+            target_voice: 5,
+        };
+        s.mod_state.lfo1 = LfoCfg { shape: 2, rate_hz: 5.5, depth: 0.8, retrig: true };
+        s.mod_state.env_attack = 0.2;
+        s.mod_state.env_decay = 1.1;
+        s.macro_labels[0] = "Dusk".to_string();
+
+        let defaults = [0.1_f32, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.25];
+        let mut bus = defaults;
+        bus[0] = 0.7; // pump moved
+        bus[3] = 0.33; // delay moved
+        let rows = diff_kit(&s, &bus, &defaults, true);
+
+        let def = kitfiles::KitDef {
+            format: kitfiles::FORMAT_TAG.to_string(),
+            name: "Round Trip".to_string(),
+            blurb: String::new(),
+            terrain: "techno".to_string(),
+            macro_labels: s.macro_labels.clone(),
+            rows,
+        };
+        let mut fresh = PersistState::default();
+        let staged = stage_kit_def(&mut fresh, &def);
+
+        // Voices: engine-unit round trip through normalize/denormalize.
+        for t in 0..MAX_TRACKS {
+            for p in 0..N_TAIL_PARAMS {
+                assert!(
+                    (fresh.voices.tracks[t][p] - s.voices.tracks[t][p]).abs() < 1e-3,
+                    "voice ({t},{p}) drifted"
+                );
+            }
+        }
+        // Mix: field-for-field via the shared get/set encoding.
+        for t in 0..MAX_TRACKS {
+            for f in 0u8..=9 {
+                assert!(
+                    (fresh.mix.tracks[t].get(f) - s.mix.tracks[t].get(f)).abs() < 1e-4,
+                    "mix ({t},{f}) drifted"
+                );
+            }
+        }
+        assert_eq!(fresh.mod_state, s.mod_state, "mod state must survive exactly");
+        assert_eq!(fresh.macro_labels, s.macro_labels);
+        // Bus: only the moved params staged, at their values; the rest None.
+        assert_eq!(staged.bus[1], Some(0.7));
+        assert_eq!(staged.bus[4], Some(0.33));
+        assert_eq!(staged.bus[2], None, "untouched bus params stay default-driven");
+        assert_eq!(staged.sidechain, Some(true));
     }
 
     #[test]
