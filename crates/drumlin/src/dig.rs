@@ -43,6 +43,8 @@ const P_VEL: u32 = 17;
 const P_ACCENT: u32 = 18;
 const P_PROB: u32 = 19;
 const P_RATCHET: u32 = 20;
+const P_MUTATE: u32 = 21;
+const P_SPLICE: u32 = 22;
 
 /// The four DIG knobs, all `0..=1`.
 #[derive(Clone, Copy, Debug)]
@@ -393,6 +395,116 @@ pub struct DigCandidate {
     pub pattern: Pattern,
 }
 
+/// MUTATE configuration: which lanes are YOURS (locked, copied verbatim from
+/// the source — notes, feel, p-locks and all) and how deep the variation cuts
+/// on the rest.
+pub struct MutateCfg {
+    pub locks: [bool; MAX_TRACKS],
+    /// `0..=1`: the per-cell probability that an unlocked cell is re-excavated
+    /// from the terrain grammar instead of kept from the source. Per-cell S&H
+    /// draws make it monotonic per seed: cells mutated at a shallow depth stay
+    /// mutated (to the SAME value) as depth rises — the knob digs deeper into
+    /// the same variation, it never rerolls it.
+    pub depth: f32,
+}
+
+/// Excavate a VARIATION of `source`: locked lanes come through bit-identical
+/// (the whole `Track` — polymeter length, level, every step payload); unlocked
+/// lanes keep the source except where the per-cell mutate draw (< `depth`)
+/// swaps in the terrain grammar's cell for this seed. The source's feel
+/// (length, swing, humanize, groove, GROOVE-LOCK seed) is preserved, so locked
+/// lanes also PLAY back identically. Deterministic given (source, terrain,
+/// knobs, cfg, seed).
+pub fn dig_mutate(
+    terrain: &Terrain,
+    knobs: &DigKnobs,
+    source: &Pattern,
+    cfg: &MutateCfg,
+    seed: u32,
+) -> Pattern {
+    let gen = dig_one(terrain, knobs, seed);
+    let mut p = *source;
+    let depth = cfg.depth.clamp(0.0, 1.0);
+    for t in 0..MAX_TRACKS {
+        if cfg.locks[t] {
+            continue;
+        }
+        for s in 0..DIG_STEPS {
+            if cell01(seed, t as u32, s as u32, P_MUTATE) < depth {
+                p.tracks[t].steps[s] = gen.tracks[t].steps[s];
+            }
+        }
+    }
+    p
+}
+
+/// Lane-level crossover: each track comes WHOLLY from `a` or `b` (a seeded
+/// coin per lane), meta from `a`. Musically coherent by construction — you get
+/// A's kick with B's hats, never a cell-salad.
+pub fn splice(a: &Pattern, b: &Pattern, seed: u32) -> Pattern {
+    let mut p = *a;
+    for t in 0..MAX_TRACKS {
+        if cell01(seed, t as u32, 0, P_SPLICE) < 0.5 {
+            p.tracks[t] = b.tracks[t];
+        }
+    }
+    p
+}
+
+/// MUTATE dig: roll variations of `source`, score, surface the best `k`.
+/// A candidate's address reproduces it GIVEN the same source + cfg (mutations
+/// are relative to your pattern at dig time).
+pub fn dig_best_mutate(
+    terrain: &Terrain,
+    knobs: &DigKnobs,
+    source: &Pattern,
+    cfg: &MutateCfg,
+    base_seed: u32,
+    k: usize,
+) -> Vec<DigCandidate> {
+    let mut all: Vec<DigCandidate> = (0..ROLLS_PER_DIG)
+        .map(|i| {
+            let seed = mix_seed(base_seed, 0xD16, i as u32, 0x0A75);
+            let pattern = dig_mutate(terrain, knobs, source, cfg, seed);
+            let score = score(terrain, &pattern, knobs);
+            DigCandidate { seed, score, pattern }
+        })
+        .collect();
+    all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    all.truncate(k.min(ROLLS_PER_DIG));
+    all
+}
+
+/// BREED from a favorite: each candidate splices the parent with a FRESH
+/// terrain roll (locked lanes force the parent's), scored, best `k` surfaced —
+/// "offspring of the one you liked."
+pub fn dig_best_breed(
+    terrain: &Terrain,
+    knobs: &DigKnobs,
+    parent: &Pattern,
+    locks: &[bool; MAX_TRACKS],
+    base_seed: u32,
+    k: usize,
+) -> Vec<DigCandidate> {
+    let mut all: Vec<DigCandidate> = (0..ROLLS_PER_DIG)
+        .map(|i| {
+            let seed = mix_seed(base_seed, 0xB4EE, i as u32, 0xD00D);
+            let fresh = dig_one(terrain, knobs, seed);
+            let mut pattern = splice(parent, &fresh, seed);
+            for t in 0..MAX_TRACKS {
+                if locks[t] {
+                    pattern.tracks[t] = parent.tracks[t];
+                }
+            }
+            let score = score(terrain, &pattern, knobs);
+            DigCandidate { seed, score, pattern }
+        })
+        .collect();
+    all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    all.truncate(k.min(ROLLS_PER_DIG));
+    all
+}
+
 /// Roll `ROLLS_PER_DIG` addresses derived from `base_seed`, score them, and
 /// return the best `k` (sorted best-first). Each candidate is addressable by
 /// its OWN seed: `dig_one(terrain, knobs, candidate.seed)` reproduces it.
@@ -697,6 +809,86 @@ mod tests {
             }
             assert!(peak <= 1.02, "{}: dig exceeded the limiter: {peak}", t.id);
             assert!(made_sound, "{}: a dig must make sound", t.id);
+        }
+    }
+
+    #[test]
+    fn mutate_locks_and_depth_behave() {
+        let t = terrain("breaks").unwrap();
+        let k = DigKnobs::default();
+        let source = Pattern::neutral_demo();
+
+        // Depth 0, no locks: the variation IS the source, bit-exact.
+        let cfg0 = MutateCfg { locks: [false; MAX_TRACKS], depth: 0.0 };
+        assert_eq!(dig_mutate(t, &k, &source, &cfg0, 7), source, "depth 0 must be the source");
+
+        // Locked lanes are bit-identical even at full depth; something else moves.
+        let mut locks = [false; MAX_TRACKS];
+        locks[0] = true; // my kick
+        locks[2] = true; // my snare
+        let cfg = MutateCfg { locks, depth: 1.0 };
+        let m = dig_mutate(t, &k, &source, &cfg, 0xC0FF_EE00);
+        assert_eq!(m.tracks[0], source.tracks[0], "locked kick must survive verbatim");
+        assert_eq!(m.tracks[2], source.tracks[2], "locked snare must survive verbatim");
+        assert_ne!(m, source, "full-depth mutation must change the unlocked lanes");
+        // The source's feel is preserved (locked lanes also PLAY identically).
+        assert_eq!(m.seed, source.seed);
+        assert_eq!(m.swing, source.swing);
+        assert_eq!(m.humanize, source.humanize);
+        assert_eq!(m.length, source.length);
+
+        // Depth accumulates, never rerolls: every cell mutated at 0.3 holds the
+        // SAME value at 0.7 (same per-cell draw, same generated cell).
+        let shallow = dig_mutate(t, &k, &source, &MutateCfg { locks: [false; MAX_TRACKS], depth: 0.3 }, 42);
+        let deep = dig_mutate(t, &k, &source, &MutateCfg { locks: [false; MAX_TRACKS], depth: 0.7 }, 42);
+        for tr in 0..MAX_TRACKS {
+            for s in 0..DIG_STEPS {
+                if shallow.tracks[tr].steps[s] != source.tracks[tr].steps[s] {
+                    assert_eq!(
+                        deep.tracks[tr].steps[s], shallow.tracks[tr].steps[s],
+                        "deeper depth must keep shallow mutations at ({tr},{s})"
+                    );
+                }
+            }
+        }
+
+        // dig_best_mutate: deterministic, sorted, and the locks hold on every candidate.
+        let a = dig_best_mutate(t, &k, &source, &cfg, 9, N_CANDIDATES);
+        let b = dig_best_mutate(t, &k, &source, &cfg, 9, N_CANDIDATES);
+        assert!(a.iter().zip(&b).all(|(x, y)| x.seed == y.seed && x.pattern == y.pattern));
+        assert!(a.windows(2).all(|w| w[0].score >= w[1].score));
+        for c in &a {
+            assert_eq!(c.pattern.tracks[0], source.tracks[0], "every candidate keeps the locked kick");
+        }
+    }
+
+    #[test]
+    fn splice_and_breed_are_lane_coherent() {
+        let t = terrain("techno").unwrap();
+        let k = DigKnobs::default();
+        let a = dig_one(t, &k, 1);
+        let b = dig_one(t, &k, 2);
+        let s = splice(&a, &b, 0x5EED);
+        let mut from_a = 0;
+        let mut from_b = 0;
+        for tr in 0..MAX_TRACKS {
+            if s.tracks[tr] == a.tracks[tr] {
+                from_a += 1;
+            } else {
+                assert_eq!(s.tracks[tr], b.tracks[tr], "every lane must come wholly from a parent");
+                from_b += 1;
+            }
+        }
+        assert!(from_a > 0 && from_b > 0, "both parents should contribute (a={from_a} b={from_b})");
+
+        // Breed: locked lanes force the parent's on every offspring; deterministic.
+        let mut locks = [false; MAX_TRACKS];
+        locks[0] = true;
+        let kids = dig_best_breed(t, &k, &a, &locks, 0xFA_B1E5, N_CANDIDATES);
+        let kids2 = dig_best_breed(t, &k, &a, &locks, 0xFA_B1E5, N_CANDIDATES);
+        assert!(kids.iter().zip(&kids2).all(|(x, y)| x.seed == y.seed && x.pattern == y.pattern));
+        for c in &kids {
+            assert_eq!(c.pattern.tracks[0], a.tracks[0], "bred offspring keep the locked kick");
         }
     }
 

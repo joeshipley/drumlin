@@ -125,6 +125,11 @@
   .dig-knob b { color: var(--text-2); min-width: 20px; font-weight: 500; }
   .dig-go { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; color: #131311; background: var(--accent); border: none; border-radius: 8px; padding: 9px 20px; cursor: default; margin-left: auto; }
   .dig-go:active { transform: scale(0.97); }
+  .dig-mutrow { margin-top: -4px; min-height: 26px; }
+  .dig-lock { font-family: var(--mono); font-size: 8px; letter-spacing: 0.5px; width: 24px; text-align: center; padding: 4px 0; border-radius: 5px; border: 1px solid var(--border); color: var(--dim); cursor: default; }
+  .dig-lock.on { color: var(--accent); border-color: rgba(224,163,62,0.55); background: rgba(224,163,62,0.10); }
+  .dig-locks { display: flex; gap: 4px; flex-wrap: wrap; }
+  .dig-mutlbl { font-family: var(--mono); font-size: 8px; letter-spacing: 1px; color: var(--dim); }
   .dig-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .dig-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
   .dig-card.play { border-color: rgba(224,163,62,0.55); background: rgba(224,163,62,0.05); }
@@ -262,8 +267,9 @@
           <span class="dig-knobs" id="digKnobs"></span>
           <button id="digBtn" class="dig-go">⛏ DIG</button>
         </div>
+        <div class="dig-bar dig-mutrow" id="digMutRow"></div>
         <div class="dig-cards" id="digCards"></div>
-        <div class="voice-hint">Pick a terrain (THIS WORLD digs in the recalled kit's dialect), set the knobs, hit DIG. <b>▶</b> auditions in tempo — the candidate plays from scratch slot 16, switched at the loop boundary; click again to return. <b>KEEP</b> commits it to the first free slot (undoable). Every dig is an address: the same seed reproduces the same groove, forever.</div>
+        <div class="voice-hint">Pick a terrain (THIS WORLD digs in the recalled kit's dialect), set the knobs, hit DIG. <b>▶</b> auditions in tempo — the candidate plays from scratch slot 16, switched at the loop boundary; click again to return. <b>KEEP</b> commits it to the first free slot (undoable). <b>MUTATE</b> digs variations of the current pattern instead — <b>LOCK</b> lanes come through verbatim (your kick stays your kick), DEPTH sets how far the rest wanders. While auditioning, <b>⚡ BREED</b> re-digs offspring of that candidate crossed with fresh rolls. Every dig is an address: the same seed reproduces the same groove, forever.</div>
       </div>
       <div class="kits-wrap" id="kitsView" style="display:none">
         <div class="voice-h">KITS · GROOVE WORLDS — recall the whole machine in one touch</div>
@@ -730,6 +736,11 @@
   let digCands = [];       // last dig-results candidates
   let digAudIdx = -1;      // auditioning candidate (-1 = none)
   let digReturnSlot = null; // where ■ RETURN goes back to
+  let digMutate = false;   // MUTATE mode: vary the CURRENT pattern
+  let digDepth = 0.5;      // per-cell variation probability
+  let digLocks = Array(12).fill(false); // lanes kept verbatim (mutate + breed)
+  const DIG_LOCK_NAMES = ["KK", "SB", "SN", "CP", "RM", "CH", "OH", "RD", "T1", "T2", "CB", "ZP"];
+  const digLockList = () => digLocks.map((v, i) => v ? i : -1).filter(i => i >= 0);
 
   function buildDig() {
     const chips = document.getElementById("digChips");
@@ -754,7 +765,51 @@
       r.addEventListener("input", () => { digKnobsV[k] = +r.value / 100; v.textContent = r.value; });
       w.appendChild(l); w.appendChild(r); w.appendChild(v); kn.appendChild(w);
     });
+    buildDigMutRow();
     renderDigCards();
+  }
+
+  function buildDigMutRow() {
+    const row = document.getElementById("digMutRow");
+    row.innerHTML = "";
+    const mut = document.createElement("span");
+    mut.className = "dig-chip" + (digMutate ? " on" : "");
+    mut.textContent = "MUTATE";
+    mut.title = "dig VARIATIONS of the current pattern instead of fresh grooves";
+    mut.addEventListener("click", () => { digMutate = !digMutate; buildDigMutRow(); });
+    row.appendChild(mut);
+    if (!digMutate) {
+      const hint = document.createElement("span");
+      hint.className = "dig-mutlbl";
+      hint.textContent = "off — digs are fresh from the terrain";
+      row.appendChild(hint);
+      return;
+    }
+    const w = document.createElement("span");
+    w.className = "dig-knob";
+    const l = document.createElement("span"); l.textContent = "DEPTH";
+    const r = document.createElement("input");
+    r.type = "range"; r.min = 0; r.max = 100; r.step = 1;
+    r.value = Math.round(digDepth * 100); r.style.width = "56px";
+    const v = document.createElement("b"); v.textContent = Math.round(digDepth * 100);
+    r.addEventListener("input", () => { digDepth = +r.value / 100; v.textContent = r.value; });
+    w.appendChild(l); w.appendChild(r); w.appendChild(v);
+    row.appendChild(w);
+    const lbl = document.createElement("span");
+    lbl.className = "dig-mutlbl";
+    lbl.textContent = "LOCK";
+    lbl.title = "locked lanes come through verbatim — your kick stays your kick";
+    row.appendChild(lbl);
+    const locks = document.createElement("span");
+    locks.className = "dig-locks";
+    DIG_LOCK_NAMES.forEach((n, i) => {
+      const c = document.createElement("span");
+      c.className = "dig-lock" + (digLocks[i] ? " on" : "");
+      c.textContent = n;
+      c.addEventListener("click", () => { digLocks[i] = !digLocks[i]; buildDigMutRow(); });
+      locks.appendChild(c);
+    });
+    row.appendChild(locks);
   }
 
   function renderDigCards() {
@@ -776,11 +831,25 @@
       aud.className = "dig-act";
       aud.textContent = i === digAudIdx ? "■ RETURN" : "▶ AUDITION";
       aud.addEventListener("click", () => digAudition(i));
+      acts.appendChild(aud);
+      if (i === digAudIdx) {
+        // Breed from the one you're vibing with: offspring = this candidate
+        // lane-spliced with fresh rolls (locks force its lanes through).
+        const breed = document.createElement("span");
+        breed.className = "dig-act";
+        breed.textContent = "⚡ BREED";
+        breed.title = "re-dig: offspring of this candidate crossed with fresh rolls";
+        breed.addEventListener("click", () => {
+          const base = (Math.random() * 0x100000000) >>> 0;
+          send({ type: "dig-breed", idx: i, terrain: digTerrain, kit_id: curKitId || "", density: digKnobsV.density, sync: digKnobsV.sync, motion: digKnobsV.motion, wild: digKnobsV.wild, base_seed: base, locks: digLockList() });
+        });
+        acts.appendChild(breed);
+      }
       const keep = document.createElement("span");
       keep.className = "dig-act keep";
       keep.textContent = "KEEP";
       keep.addEventListener("click", () => digKeep(i));
-      acts.appendChild(aud); acts.appendChild(keep); card.appendChild(acts);
+      acts.appendChild(keep); card.appendChild(acts);
       grid.appendChild(card);
     });
   }
@@ -846,7 +915,7 @@
 
   document.getElementById("digBtn").addEventListener("click", () => {
     const base = (Math.random() * 0x100000000) >>> 0;
-    send({ type: "dig", terrain: digTerrain, kit_id: curKitId || "", density: digKnobsV.density, sync: digKnobsV.sync, motion: digKnobsV.motion, wild: digKnobsV.wild, base_seed: base });
+    send({ type: "dig", terrain: digTerrain, kit_id: curKitId || "", density: digKnobsV.density, sync: digKnobsV.sync, motion: digKnobsV.motion, wild: digKnobsV.wild, base_seed: base, mutate: digMutate, depth: digDepth, locks: digLockList() });
   });
 
   function setView(name) {

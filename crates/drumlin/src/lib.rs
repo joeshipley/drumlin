@@ -112,7 +112,23 @@ enum Action {
     /// Clear any CC bound to a macro (and disarm if it was learning).
     MidiClear { macro_idx: u8 },
     /// Excavate: roll candidates from a terrain at the given knobs + base seed.
-    Dig { terrain: String, kit_id: String, density: f32, sync: f32, motion: f32, wild: f32, base_seed: u32 },
+    /// With `mutate` set, candidates are VARIATIONS of the current pattern —
+    /// `locks` lists track indices kept verbatim, `depth` is the per-cell
+    /// variation probability. (serde-defaulted for stale-GUI compatibility.)
+    Dig {
+        terrain: String, kit_id: String,
+        density: f32, sync: f32, motion: f32, wild: f32, base_seed: u32,
+        #[serde(default)] mutate: bool,
+        #[serde(default)] depth: f32,
+        #[serde(default)] locks: Vec<u8>,
+    },
+    /// Breed from candidate `idx`: offspring = the parent spliced lane-wise
+    /// with fresh terrain rolls (locks force the parent's lanes).
+    DigBreed {
+        idx: u8, terrain: String, kit_id: String,
+        density: f32, sync: f32, motion: f32, wild: f32, base_seed: u32,
+        #[serde(default)] locks: Vec<u8>,
+    },
     /// Audition candidate `idx` in tempo (scratch slot + queued switch).
     DigAudition { idx: u8 },
     /// Commit candidate `idx` into bank slot `slot` (undo-snapshotted).
@@ -729,6 +745,27 @@ fn full_json(
     msg
 }
 
+/// Resolve a DIG terrain id (THIS WORLD speaks the recalled kit's dialect;
+/// unknown ids fall back to techno) and clamp the knobs.
+fn resolve_dig(terrain: &str, kit_id: &str) -> &'static dig::Terrain {
+    if terrain == "this-world" {
+        dig::terrain_for_world(kit_id)
+    } else {
+        dig::terrain(terrain).unwrap_or(&dig::TECHNO)
+    }
+}
+
+/// Decode the GUI's locked-track list into the engine's mask.
+fn lock_mask(locks: &[u8]) -> [bool; MAX_TRACKS] {
+    let mut m = [false; MAX_TRACKS];
+    for &t in locks {
+        if (t as usize) < MAX_TRACKS {
+            m[t as usize] = true;
+        }
+    }
+    m
+}
+
 /// True for actions that change the current pattern's content (snapshotted for
 /// undo). Selection / transport / sound / continuous-feel edits are excluded.
 /// A GROOVE WORLD recall counts — it memcpys the world's groove over the current
@@ -1295,21 +1332,31 @@ impl Plugin for Drumlin {
                         }
                         cleared_watch.store(macro_idx as i8, Ordering::Relaxed);
                     }
-                    Action::Dig { terrain, kit_id, density, sync, motion, wild, base_seed } => {
-                        // Resolve the dig site: THIS WORLD speaks the recalled
-                        // kit's dialect; unknown ids fall back to techno.
-                        let t = if terrain == "this-world" {
-                            dig::terrain_for_world(&kit_id)
-                        } else {
-                            dig::terrain(&terrain).unwrap_or(&dig::TECHNO)
-                        };
+                    Action::Dig { terrain, kit_id, density, sync, motion, wild, base_seed, mutate, depth, locks } => {
+                        let t = resolve_dig(&terrain, &kit_id);
                         let knobs = dig::DigKnobs {
                             density: density.clamp(0.0, 1.0),
                             sync: sync.clamp(0.0, 1.0),
                             motion: motion.clamp(0.0, 1.0),
                             wild: wild.clamp(0.0, 1.0),
                         };
-                        let cands = dig::dig_best(t, &knobs, base_seed, dig::N_CANDIDATES);
+                        // MUTATE digs vary the CURRENT pattern (engine truth: the
+                        // persisted copy); locked lanes come through verbatim.
+                        let cands = if mutate {
+                            let source = params.state.lock().ok().and_then(|s| {
+                                s.seq.patterns.get(s.seq.current as usize).copied()
+                            });
+                            match source {
+                                Some(src) => dig::dig_best_mutate(
+                                    t, &knobs, &src,
+                                    &dig::MutateCfg { locks: lock_mask(&locks), depth: depth.clamp(0.0, 1.0) },
+                                    base_seed, dig::N_CANDIDATES,
+                                ),
+                                None => dig::dig_best(t, &knobs, base_seed, dig::N_CANDIDATES),
+                            }
+                        } else {
+                            dig::dig_best(t, &knobs, base_seed, dig::N_CANDIDATES)
+                        };
                         let msg = json!({
                             "type": "dig-results",
                             "terrain": t.id,
@@ -1325,6 +1372,39 @@ impl Plugin for Drumlin {
                             *ld = cands;
                         }
                         ctx.send_json(msg);
+                    }
+                    Action::DigBreed { idx, terrain, kit_id, density, sync, motion, wild, base_seed, locks } => {
+                        // Offspring of the favorite: parent x fresh rolls, lane-
+                        // spliced, locks forcing the parent's lanes.
+                        let parent =
+                            last_dig.lock().ok().and_then(|ld| ld.get(idx as usize).map(|c| c.pattern));
+                        if let Some(parent) = parent {
+                            let t = resolve_dig(&terrain, &kit_id);
+                            let knobs = dig::DigKnobs {
+                                density: density.clamp(0.0, 1.0),
+                                sync: sync.clamp(0.0, 1.0),
+                                motion: motion.clamp(0.0, 1.0),
+                                wild: wild.clamp(0.0, 1.0),
+                            };
+                            let cands = dig::dig_best_breed(
+                                t, &knobs, &parent, &lock_mask(&locks), base_seed, dig::N_CANDIDATES,
+                            );
+                            let msg = json!({
+                                "type": "dig-results",
+                                "terrain": t.id,
+                                "candidates": cands.iter().map(|c| json!({
+                                    "seed": c.seed,
+                                    "score": c.score,
+                                    "swing": c.pattern.swing,
+                                    "humanize": c.pattern.humanize,
+                                    "cells": pattern_cells(&c.pattern),
+                                })).collect::<Vec<_>>(),
+                            });
+                            if let Ok(mut ld) = last_dig.lock() {
+                                *ld = cands;
+                            }
+                            ctx.send_json(msg);
+                        }
                     }
                     Action::DigAudition { idx } => {
                         // Stage the candidate into the scratch slot (its old
