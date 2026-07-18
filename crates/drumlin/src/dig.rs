@@ -157,11 +157,145 @@ pub static BREAKS: Terrain = Terrain {
     ],
 };
 
-/// The factory dig sites (chunk 2 grows this + maps THIS-WORLD terrains).
-pub static TERRAINS: &[&Terrain] = &[&TECHNO, &BREAKS];
+/// DISCO — the Discothèque dialect: four-on-the-floor, snare+clap backbeat,
+/// THE open hat on every off-8th, 16th-leaning closed hats, cowbell winks.
+pub static DISCO: Terrain = Terrain {
+    id: "disco",
+    name: "Disco",
+    swing: 58,
+    humanize: 14,
+    lanes: [
+        lane(Role::Anchor, 1.0, 98, 120, [95, 2, 3, 2, 92, 2, 4, 2, 95, 2, 3, 2, 92, 3, 5, 8]),
+        lane(Role::Anchor, 0.15, 82, 96, [60, 0, 0, 0, 0, 0, 0, 0, 55, 0, 0, 0, 0, 0, 0, 0]),
+        lane(Role::Backbeat, 0.8, 84, 112, [0, 3, 2, 4, 88, 3, 2, 6, 0, 3, 2, 4, 88, 3, 4, 10]),
+        lane(Role::Backbeat, 0.75, 88, 110, [0, 2, 0, 2, 85, 2, 0, 3, 0, 2, 0, 2, 85, 2, 0, 5]),
+        lane(Role::Color, 0.4, 60, 84, [0, 8, 3, 10, 0, 6, 3, 8, 0, 8, 3, 10, 0, 6, 4, 12]),
+        lane(Role::Motor, 1.0, 66, 94, [55, 18, 70, 18, 55, 18, 70, 20, 55, 18, 70, 18, 55, 20, 70, 24]),
+        // The off-8th open hat is THE disco signature — fully committed, so it
+        // survives the off-position sync discount at default knobs.
+        lane(Role::Motor, 1.0, 78, 100, [0, 0, 92, 0, 0, 0, 92, 0, 0, 0, 92, 0, 0, 0, 92, 6]),
+        lane(Role::Motor, 0.2, 56, 78, [10, 0, 18, 0, 10, 0, 18, 0, 10, 0, 18, 0, 10, 0, 18, 0]),
+        lane(Role::Color, 0.25, 68, 92, [0, 2, 0, 5, 0, 3, 0, 6, 0, 2, 0, 5, 0, 4, 3, 12]),
+        lane(Role::Color, 0.25, 68, 92, [0, 4, 0, 3, 0, 5, 0, 4, 0, 4, 0, 3, 0, 6, 3, 10]),
+        lane(Role::Color, 0.3, 62, 86, [0, 0, 12, 0, 0, 8, 0, 4, 0, 0, 12, 0, 0, 8, 0, 10]),
+        lane(Role::Color, 0.2, 66, 92, [0, 4, 0, 8, 0, 4, 0, 6, 0, 4, 0, 8, 0, 5, 0, 10]),
+    ],
+};
+
+/// HALFTIME — the Marseille dialect: 808 half-time. Syncopated kick, the
+/// backbeat lands ONLY on beat 3 (step 8), hats carry the subdivision, big
+/// space, humanized hand-feel.
+pub static HALFTIME: Terrain = Terrain {
+    id: "halftime",
+    name: "Halftime",
+    swing: 54,
+    humanize: 26,
+    lanes: [
+        lane(Role::Anchor, 1.0, 100, 122, [95, 4, 8, 3, 3, 5, 55, 10, 3, 4, 50, 4, 8, 5, 12, 6]),
+        lane(Role::Anchor, 0.35, 86, 104, [70, 0, 0, 4, 0, 0, 25, 0, 0, 0, 20, 0, 6, 0, 0, 0]),
+        lane(Role::Backbeat, 1.0, 60, 118, [0, 4, 2, 6, 0, 3, 2, 8, 92, 4, 8, 6, 0, 6, 3, 14]),
+        lane(Role::Backbeat, 0.3, 82, 102, [0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 6]),
+        lane(Role::Color, 0.5, 56, 82, [0, 10, 4, 12, 0, 8, 0, 10, 0, 10, 4, 12, 0, 8, 6, 14]),
+        lane(Role::Motor, 1.0, 62, 92, [75, 12, 45, 14, 75, 14, 45, 30, 75, 12, 45, 14, 75, 16, 45, 35]),
+        lane(Role::Motor, 0.4, 74, 96, [0, 0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 50, 0]),
+        lane(Role::Motor, 0.1, 54, 76, [10, 0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0]),
+        lane(Role::Color, 0.3, 66, 92, [0, 0, 0, 5, 0, 4, 0, 8, 0, 0, 0, 6, 0, 10, 8, 16]),
+        lane(Role::Color, 0.3, 66, 92, [0, 4, 0, 0, 0, 5, 0, 4, 0, 4, 0, 0, 0, 8, 10, 14]),
+        silent(),
+        lane(Role::Color, 0.3, 68, 96, [0, 5, 0, 10, 0, 0, 0, 8, 0, 5, 0, 10, 0, 0, 8, 12]),
+    ],
+};
+
+/// FOOTWORK — 160-BPM juke: the 3-3-2 kick lattice (0,3,6 / 10,13), clap
+/// stabs, melodic toms, spare hats, machine-tight feel.
+pub static FOOTWORK: Terrain = Terrain {
+    id: "footwork",
+    name: "Footwork",
+    swing: 50,
+    humanize: 6,
+    lanes: [
+        lane(Role::Anchor, 1.0, 98, 122, [92, 2, 4, 70, 3, 4, 72, 3, 4, 3, 68, 3, 4, 60, 6, 4]),
+        lane(Role::Anchor, 0.4, 84, 104, [60, 0, 0, 30, 0, 0, 30, 0, 0, 0, 25, 0, 0, 20, 0, 0]),
+        lane(Role::Backbeat, 0.5, 58, 108, [0, 3, 0, 6, 55, 3, 0, 10, 0, 4, 0, 8, 55, 4, 10, 14]),
+        lane(Role::Backbeat, 0.7, 84, 108, [0, 0, 8, 0, 60, 0, 10, 0, 0, 8, 0, 0, 60, 0, 12, 8]),
+        lane(Role::Color, 0.5, 58, 84, [0, 12, 0, 8, 0, 10, 0, 12, 0, 12, 0, 8, 0, 10, 6, 14]),
+        lane(Role::Motor, 0.55, 60, 84, [60, 0, 25, 0, 60, 0, 25, 0, 60, 0, 25, 0, 60, 0, 25, 0]),
+        lane(Role::Motor, 0.2, 72, 92, [0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 35, 0]),
+        silent(),
+        lane(Role::Color, 0.6, 70, 100, [0, 6, 0, 18, 0, 8, 0, 14, 0, 6, 0, 18, 0, 12, 10, 8]),
+        lane(Role::Color, 0.6, 70, 100, [0, 14, 0, 6, 0, 12, 0, 8, 0, 14, 0, 6, 0, 8, 12, 10]),
+        lane(Role::Color, 0.25, 64, 88, [0, 0, 10, 0, 0, 10, 0, 0, 0, 0, 10, 0, 6, 0, 10, 0]),
+        lane(Role::Color, 0.5, 72, 102, [0, 10, 0, 14, 0, 6, 0, 12, 0, 10, 0, 14, 0, 8, 0, 16]),
+    ],
+};
+
+/// CAVERN — the Bladerunner dialect: sparse and deep. Kick at 0 and 11, the
+/// TOMS carry the groove (call at 4, answer at 7, echo at 14/15), a ride-bell
+/// pulse is the motor, almost nothing else. Space is the instrument.
+pub static CAVERN: Terrain = Terrain {
+    id: "cavern",
+    name: "Cavern",
+    swing: 52,
+    humanize: 12,
+    lanes: [
+        lane(Role::Anchor, 1.0, 96, 118, [90, 0, 2, 0, 0, 3, 0, 4, 0, 2, 0, 65, 0, 3, 0, 6]),
+        lane(Role::Anchor, 0.3, 84, 100, [55, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 0, 0, 0, 0]),
+        lane(Role::Backbeat, 0.15, 70, 96, [0, 0, 0, 0, 25, 0, 0, 0, 0, 0, 0, 0, 25, 0, 0, 6]),
+        silent(),
+        lane(Role::Color, 0.35, 54, 80, [0, 8, 0, 6, 0, 0, 8, 0, 0, 8, 0, 6, 0, 0, 10, 0]),
+        lane(Role::Motor, 0.15, 52, 72, [15, 0, 0, 0, 15, 0, 0, 0, 15, 0, 0, 0, 15, 0, 0, 0]),
+        silent(),
+        lane(Role::Motor, 0.7, 58, 84, [70, 0, 25, 0, 55, 0, 25, 0, 70, 0, 25, 0, 55, 0, 30, 0]),
+        lane(Role::Color, 0.85, 74, 104, [0, 0, 0, 0, 60, 0, 4, 0, 0, 6, 0, 0, 0, 4, 55, 0]),
+        lane(Role::Color, 0.85, 74, 104, [0, 0, 0, 10, 0, 0, 0, 60, 0, 4, 0, 0, 8, 0, 0, 45]),
+        silent(),
+        lane(Role::Color, 0.2, 62, 90, [0, 0, 6, 0, 0, 6, 0, 0, 0, 0, 8, 0, 0, 6, 0, 10]),
+    ],
+};
+
+/// OUTRUN — the Outrun dialect: 80s gated synthwave. Driving kick, the BIG
+/// gated snare on 4 and 12, 8th hats, zap stabs, and the late-bar tom fill.
+pub static OUTRUN_T: Terrain = Terrain {
+    id: "outrun",
+    name: "Outrun",
+    swing: 50,
+    humanize: 10,
+    lanes: [
+        lane(Role::Anchor, 1.0, 100, 122, [95, 2, 3, 2, 90, 2, 4, 25, 95, 2, 3, 2, 90, 3, 6, 8]),
+        lane(Role::Anchor, 0.1, 82, 96, [50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        lane(Role::Backbeat, 1.0, 88, 120, [0, 2, 2, 3, 95, 2, 3, 6, 0, 2, 2, 3, 95, 3, 5, 12]),
+        lane(Role::Backbeat, 0.4, 84, 106, [0, 0, 0, 0, 55, 0, 0, 0, 0, 0, 0, 0, 55, 0, 0, 4]),
+        lane(Role::Color, 0.3, 58, 82, [0, 8, 0, 6, 0, 8, 0, 6, 0, 8, 0, 6, 0, 8, 4, 10]),
+        lane(Role::Motor, 1.0, 64, 92, [70, 12, 60, 12, 70, 12, 60, 14, 70, 12, 60, 12, 70, 14, 60, 18]),
+        lane(Role::Motor, 0.35, 74, 94, [0, 0, 45, 0, 0, 0, 0, 0, 0, 0, 45, 0, 0, 0, 0, 0]),
+        lane(Role::Motor, 0.15, 54, 76, [12, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 0]),
+        lane(Role::Color, 0.45, 72, 100, [0, 0, 0, 4, 0, 3, 0, 6, 0, 0, 0, 5, 0, 14, 18, 10]),
+        lane(Role::Color, 0.45, 72, 100, [0, 3, 0, 0, 0, 4, 0, 3, 0, 3, 0, 0, 10, 8, 16, 20]),
+        lane(Role::Color, 0.1, 62, 84, [0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 6]),
+        lane(Role::Color, 0.6, 74, 104, [0, 8, 0, 14, 0, 6, 25, 0, 0, 8, 0, 14, 0, 10, 0, 20]),
+    ],
+};
+
+/// The factory dig sites. The first five are the DIG page chips; CAVERN and
+/// OUTRUN are the world dialects (reachable via THIS WORLD, and by id).
+pub static TERRAINS: &[&Terrain] =
+    &[&TECHNO, &BREAKS, &DISCO, &HALFTIME, &FOOTWORK, &CAVERN, &OUTRUN_T];
 
 pub fn terrain(id: &str) -> Option<&'static Terrain> {
     TERRAINS.iter().find(|t| t.id == id).copied()
+}
+
+/// THIS WORLD: the dig dialect for a recalled factory kit. Digs in Bladerunner
+/// come out sparse and cavernous; in Discothèque, four-on-the-floor. Neutral
+/// (or an unknown/no kit) speaks the bare machine's tongue: techno.
+pub fn terrain_for_world(kit_id: &str) -> &'static Terrain {
+    match kit_id {
+        "discotheque" => &DISCO,
+        "marseille" => &HALFTIME,
+        "bladerunner" => &CAVERN,
+        "outrun" => &OUTRUN_T,
+        _ => &TECHNO,
+    }
 }
 
 #[inline]
@@ -268,7 +402,7 @@ pub fn dig_best(terrain: &Terrain, knobs: &DigKnobs, base_seed: u32, k: usize) -
         .map(|i| {
             let seed = mix_seed(base_seed, 0xD16, i as u32, 0x5EED);
             let pattern = dig_one(terrain, knobs, seed);
-            let score = score(&pattern, knobs);
+            let score = score(terrain, &pattern, knobs);
             DigCandidate { seed, score, pattern }
         })
         .collect();
@@ -279,8 +413,12 @@ pub fn dig_best(terrain: &Terrain, knobs: &DigKnobs, base_seed: u32, k: usize) -
 
 /// Score a candidate in the 16-step dig window: how much like MUSIC is it?
 /// Deterministic heuristics, each `0..=1`, weighted to sum 1. This is the taste
-/// filter that separates a dig from a dice roll.
-pub fn score(p: &Pattern, knobs: &DigKnobs) -> f32 {
+/// filter that separates a dig from a dice roll. Terrain-aware where it must
+/// be: the density term compares against the TERRAIN'S OWN expected hit count
+/// at these knobs (a sparse cavern isn't punished for being sparse), and the
+/// motor term follows whichever lane the terrain actually uses as its motor
+/// (the cavern's motor is the ride, not the closed hat).
+pub fn score(terrain: &Terrain, p: &Pattern, knobs: &DigKnobs) -> f32 {
     let mut total = 0u32;
     let mut off_grid = 0u32;
     let mut col = [0u32; DIG_STEPS];
@@ -309,23 +447,45 @@ pub fn score(p: &Pattern, knobs: &DigKnobs) -> f32 {
     let kick_hits = (0..DIG_STEPS).filter(|&s| p.tracks[0].steps[s].on).count() as f32;
     let a_anchor = (if p.tracks[0].steps[0].on { 1.0 } else { 0.25 }) * band(kick_hits, 2.0, 8.0);
 
-    // Backbeat: snare or clap on 4/12 (either half).
+    // Backbeat: snare or clap on 4/12 (either half). Terrains without a
+    // backbeat identity give every candidate the same floor — within-terrain
+    // ranking is unaffected.
     let bb = p.tracks[2].steps[4].on
         || p.tracks[2].steps[12].on
         || p.tracks[3].steps[4].on
         || p.tracks[3].steps[12].on;
     let a_backbeat = if bb { 1.0 } else { 0.35 };
 
-    // Density band: total hits near the knob's target.
-    let target = lerp(10.0, 34.0, knobs.density);
-    let a_density = (1.0 - ((total as f32 - target).abs() / target)).max(0.0);
+    // Density: total hits near what THIS terrain's priors predict at these
+    // knobs (the sum of every cell's on-probability) — self-calibrating for
+    // sparse and dense terrains alike.
+    let mut expected = 0.0_f32;
+    for lane in terrain.lanes.iter() {
+        if lane.activity > 0.0 {
+            for s in 0..DIG_STEPS {
+                expected += on_probability(lane, s, knobs);
+            }
+        }
+    }
+    let a_density = (1.0 - ((total as f32 - expected).abs() / expected.max(1.0))).max(0.0);
 
     // Syncopation balance: off-grid ratio near the knob's target.
     let r_off = off_grid as f32 / total as f32;
     let a_sync = (1.0 - (r_off - lerp(0.12, 0.55, knobs.sync)).abs() * 2.0).max(0.0);
 
-    // Motor flow: the hat lane shouldn't leave holes (longest cyclic gap <= 4).
-    let a_motor = motor_flow(p);
+    // Motor flow: the terrain's busiest motor lane shouldn't leave holes.
+    // Neutral when the terrain has no committed motor (all-sparse terrains).
+    let motor_lane = terrain
+        .lanes
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.role == Role::Motor && l.activity >= 0.5)
+        .max_by(|a, b| a.1.activity.partial_cmp(&b.1.activity).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i);
+    let a_motor = match motor_lane {
+        Some(lane) => motor_flow(p, lane),
+        None => 0.75,
+    };
 
     // Mud: penalize columns where too many voices pile up.
     let crowded = col.iter().filter(|&&c| c >= 6).count() as f32;
@@ -356,10 +516,10 @@ fn band(x: f32, lo: f32, hi: f32) -> f32 {
     }
 }
 
-/// Longest cyclic gap between closed-hat hits, mapped to `0..=1` (a motor that
-/// stalls for more than a quarter note loses its flow score).
-fn motor_flow(p: &Pattern) -> f32 {
-    let hits: Vec<usize> = (0..DIG_STEPS).filter(|&s| p.tracks[5].steps[s].on).collect();
+/// Longest cyclic gap between a motor lane's hits, mapped to `0..=1` (a motor
+/// that stalls for more than a quarter note loses its flow score).
+fn motor_flow(p: &Pattern, lane: usize) -> f32 {
+    let hits: Vec<usize> = (0..DIG_STEPS).filter(|&s| p.tracks[lane].steps[s].on).collect();
     if hits.is_empty() {
         return 0.2;
     }
@@ -485,8 +645,8 @@ mod tests {
         }
         for t in TERRAINS {
             let best = &dig_best(t, &k, 42, 1)[0];
-            assert!(best.score > score(&empty, &k), "{}: a dig must beat silence", t.id);
-            assert!(best.score > score(&wall, &k), "{}: a dig must beat a wall of hits", t.id);
+            assert!(best.score > score(t, &empty, &k), "{}: a dig must beat silence", t.id);
+            assert!(best.score > score(t, &wall, &k), "{}: a dig must beat a wall of hits", t.id);
         }
     }
 
@@ -538,6 +698,77 @@ mod tests {
             assert!(peak <= 1.02, "{}: dig exceeded the limiter: {peak}", t.id);
             assert!(made_sound, "{}: a dig must make sound", t.id);
         }
+    }
+
+    #[test]
+    fn terrains_speak_their_dialects() {
+        // Character tests at WILD = 0 (pure priors: a 0-prior cell is a
+        // GUARANTEED rest, so dialect signatures are structural, not luck).
+        // Deterministic: fixed base seeds, top-of-48 candidates.
+        let k = DigKnobs { wild: 0.0, ..DigKnobs::default() };
+        let top = |t: &Terrain, seed: u32| dig_best(t, &k, seed, 1).remove(0).pattern;
+
+        // DISCO: four-on-the-floor + THE off-8th open hat.
+        let p = top(&DISCO, 0x00D1_5C00);
+        let quarters = [0, 4, 8, 12].iter().filter(|&&s| p.tracks[0].steps[s].on).count();
+        assert!(quarters >= 3, "disco needs its four-on-the-floor (got {quarters})");
+        let open_off8 = [2, 6, 10, 14].iter().filter(|&&s| p.tracks[6].steps[s].on).count();
+        assert!(open_off8 >= 2, "disco needs the offbeat open hats (got {open_off8})");
+
+        // HALFTIME: the backbeat lands on step 8 ONLY — 4 and 12 are silent by
+        // authoring (prior 0 -> guaranteed at wild 0).
+        let p = top(&HALFTIME, 0x000A_1F00);
+        assert!(p.tracks[2].steps[8].on || p.tracks[3].steps[8].on, "halftime backbeat on beat 3");
+        for s in [4, 12] {
+            assert!(
+                !p.tracks[2].steps[s].on && !p.tracks[3].steps[s].on,
+                "halftime must NOT backbeat on step {s}"
+            );
+        }
+
+        // FOOTWORK: the 3-3-2 kick lattice.
+        let p = top(&FOOTWORK, 0x00F0_0700);
+        assert!(p.tracks[0].steps[0].on, "footwork anchors the downbeat");
+        let lattice = [3, 6, 10, 13].iter().filter(|&&s| p.tracks[0].steps[s].on).count();
+        assert!(lattice >= 2, "footwork needs its syncopated kick lattice (got {lattice})");
+
+        // CAVERN: sparse, toms carry it, no hat wall.
+        let p = top(&CAVERN, 0x00CA_0E00);
+        let total: usize =
+            (0..MAX_TRACKS).map(|t| (0..DIG_STEPS).filter(|&s| p.tracks[t].steps[s].on).count()).sum();
+        assert!(total <= 20, "cavern must stay sparse (got {total} hits)");
+        let toms = (0..DIG_STEPS)
+            .filter(|&s| p.tracks[8].steps[s].on || p.tracks[9].steps[s].on)
+            .count();
+        assert!(toms >= 2, "cavern toms carry the groove (got {toms})");
+        let chat = (0..DIG_STEPS).filter(|&s| p.tracks[5].steps[s].on).count();
+        assert!(chat <= 4, "cavern must not grow a hat wall (got {chat})");
+
+        // OUTRUN: the big gated backbeat on 4 AND 12.
+        let p = top(&OUTRUN_T, 0x0427_0000);
+        assert!(
+            p.tracks[2].steps[4].on && p.tracks[2].steps[12].on,
+            "outrun needs the gated snare on both backbeats"
+        );
+    }
+
+    #[test]
+    fn every_factory_world_has_a_terrain_dialect() {
+        // THIS WORLD must resolve every factory kit to a REGISTERED terrain.
+        for kit in crate::kits::FACTORY_KITS {
+            let t = terrain_for_world(kit.id);
+            assert!(
+                TERRAINS.iter().any(|x| std::ptr::eq(*x, t)),
+                "world {} maps to an unregistered terrain",
+                kit.id
+            );
+        }
+        assert_eq!(terrain_for_world("discotheque").id, "disco");
+        assert_eq!(terrain_for_world("marseille").id, "halftime");
+        assert_eq!(terrain_for_world("bladerunner").id, "cavern");
+        assert_eq!(terrain_for_world("outrun").id, "outrun");
+        assert_eq!(terrain_for_world("neutral").id, "techno", "the bare machine speaks techno");
+        assert_eq!(terrain_for_world("garbage").id, "techno", "unknown ids fall back safely");
     }
 
     #[test]
