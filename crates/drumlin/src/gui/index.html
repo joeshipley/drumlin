@@ -215,6 +215,7 @@
       <div class="chip fill" id="fill" title="Hold to engage Fill-conditional steps">FILL</div>
       <div class="chip btn" id="undo" title="Undo grid edit">↶</div>
       <div class="chip btn" id="redo" title="Redo grid edit">↷</div>
+      <div class="chip btn" id="midexp" title="Export the current pattern as a MIDI file — revealed in Finder, drag it onto a DAW track (GM drum map; swing/feel baked in)">MID ⤓</div>
       <div class="chip"><b id="bpm">120</b> BPM</div>
       <div class="chip slid">SW <input type="range" id="swing" min="50" max="75" value="50" style="width:54px"><b id="swingv">50</b></div>
       <div class="chip slid">HM <input type="range" id="human" min="0" max="100" value="0" style="width:48px"><b id="humanv">0</b></div>
@@ -528,6 +529,7 @@
   seqBtn.addEventListener("click", () => { seqOn = !seqOn; seqBtn.classList.toggle("on", seqOn); send({ type: "seq-enable", on: seqOn }); });
   document.getElementById("undo").addEventListener("click", () => send({ type: "undo" }));
   document.getElementById("redo").addEventListener("click", () => send({ type: "redo" }));
+  document.getElementById("midexp").addEventListener("click", () => send({ type: "export-midi", slot: cur }));
   // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z = redo. Not while typing in a text
   // field (the preset-name input keeps its native text undo).
   document.addEventListener("keydown", (e) => {
@@ -849,7 +851,14 @@
       keep.className = "dig-act keep";
       keep.textContent = "KEEP";
       keep.addEventListener("click", () => digKeep(i));
-      acts.appendChild(keep); card.appendChild(acts);
+      acts.appendChild(keep);
+      const mid = document.createElement("span");
+      mid.className = "dig-act";
+      mid.textContent = "MID ⤓";
+      mid.title = "export this candidate as a MIDI file (no keep needed)";
+      mid.addEventListener("click", () => send({ type: "export-midi-dig", idx: i }));
+      acts.appendChild(mid);
+      card.appendChild(acts);
       grid.appendChild(card);
     });
   }
@@ -1182,6 +1191,14 @@
     } else if (msg.type === "dig-kept") {
       // Committed engine-side; the slot chips repaint via the status echo.
       if (curView === "dig") renderDigCards();
+    } else if (msg.type === "midi-exported") {
+      // Flash the header chip so the click visibly landed (the file is
+      // simultaneously revealed in Finder for the drag).
+      const chip = document.getElementById("midexp");
+      const old = chip.textContent;
+      chip.textContent = "✓ " + (msg.file || "saved");
+      chip.style.color = "var(--accent)";
+      setTimeout(() => { chip.textContent = old; chip.style.color = ""; }, 1400);
     } else if (msg.type === "ab-active") {
       // The plugin confirms accepted stores/recalls; an empty-register click
       // is refused engine-side and sends nothing.

@@ -10,6 +10,7 @@
 
 pub mod dig;
 mod kits;
+pub mod midi_export;
 mod presets;
 mod worlds;
 
@@ -133,6 +134,10 @@ enum Action {
     DigAudition { idx: u8 },
     /// Commit candidate `idx` into bank slot `slot` (undo-snapshotted).
     DigKeep { idx: u8, slot: u8 },
+    /// Export a bank slot's pattern as a .mid (revealed in Finder for drag-in).
+    ExportMidi { slot: u8 },
+    /// Export dig candidate `idx` as a .mid the same way (no keep needed).
+    ExportMidiDig { idx: u8 },
     Undo,
     Redo,
     Transport { play: bool },
@@ -764,6 +769,20 @@ fn lock_mask(locks: &[u8]) -> [bool; MAX_TRACKS] {
         }
     }
     m
+}
+
+/// Write `p` to `~/Music/Drumlin/<stem>.mid` and reveal it in Finder so it can
+/// be dragged onto a DAW track. Editor-thread only. Returns the filename.
+fn export_midi_file(p: &Pattern, stem: &str) -> Option<String> {
+    let dir = midi_export::export_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{stem}.mid"));
+    std::fs::write(&path, midi_export::pattern_to_midi(p)).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+    }
+    Some(format!("{stem}.mid"))
 }
 
 /// True for actions that change the current pattern's content (snapshotted for
@@ -1451,6 +1470,29 @@ impl Plugin for Drumlin {
                                 }
                                 push_edit!(SeqEdit::SelectPattern { idx: slot });
                                 ctx.send_json(json!({ "type": "dig-kept", "slot": slot }));
+                            }
+                        }
+                    }
+                    Action::ExportMidi { slot } => {
+                        let p = params.state.lock().ok().and_then(|s| {
+                            s.seq.patterns.get(slot.min(SCRATCH_SLOT) as usize).copied()
+                        });
+                        if let Some(p) = p {
+                            let stem = format!("Drumlin-P{:02}", slot.min(SCRATCH_SLOT) + 1);
+                            if let Some(file) = export_midi_file(&p, &stem) {
+                                ctx.send_json(json!({ "type": "midi-exported", "file": file }));
+                            }
+                        }
+                    }
+                    Action::ExportMidiDig { idx } => {
+                        let c = last_dig
+                            .lock()
+                            .ok()
+                            .and_then(|ld| ld.get(idx as usize).map(|c| (c.seed, c.pattern)));
+                        if let Some((seed, p)) = c {
+                            let stem = format!("Drumlin-DIG-{seed:08X}");
+                            if let Some(file) = export_midi_file(&p, &stem) {
+                                ctx.send_json(json!({ "type": "midi-exported", "file": file }));
                             }
                         }
                     }

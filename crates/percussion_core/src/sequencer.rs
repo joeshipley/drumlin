@@ -60,7 +60,9 @@ impl TrigCondition {
         }
     }
 
-    fn passes(self, loop_index: u64, fill_active: bool) -> bool {
+    /// Public so the MIDI export can bake conditions with the engine's own
+    /// gate (loop 0, fill off) instead of a drifting copy.
+    pub fn passes(self, loop_index: u64, fill_active: bool) -> bool {
         match self {
             TrigCondition::Always => true,
             TrigCondition::Fill => fill_active,
@@ -94,8 +96,8 @@ impl Default for GrooveTemplate {
 
 impl GrooveTemplate {
     /// Per-step micro push as a fraction of one step (0..~0.2), before the
-    /// `groove_amount` blend.
-    fn offset_frac(self, step: usize) -> f32 {
+    /// `groove_amount` blend. Public so the MIDI export bakes the same offsets.
+    pub fn offset_frac(self, step: usize) -> f32 {
         match self {
             GrooveTemplate::Straight => 0.0,
             GrooveTemplate::Mpc16 => match step % 4 {
